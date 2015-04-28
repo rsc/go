@@ -102,10 +102,10 @@ func dirList(w ResponseWriter, f File) {
 // The name is otherwise unused; in particular it can be empty and is
 // never sent in the response.
 //
-// If modtime is not the zero time, ServeContent includes it in a
-// Last-Modified header in the response.  If the request includes an
-// If-Modified-Since header, ServeContent uses modtime to decide
-// whether the content needs to be sent at all.
+// If modtime is not the zero time or Unix epoch, ServeContent
+// includes it in a Last-Modified header in the response.  If the
+// request includes an If-Modified-Since header, ServeContent uses
+// modtime to decide whether the content needs to be sent at all.
 //
 // The content's Seek method must work: ServeContent uses
 // a seek to the end of the content to determine its size.
@@ -258,10 +258,15 @@ func serveContent(w ResponseWriter, r *Request, name string, modtime time.Time, 
 	}
 }
 
+var unixEpochTime = time.Unix(0, 0)
+
 // modtime is the modification time of the resource to be served, or IsZero().
 // return value is whether this request is now complete.
 func checkLastModified(w ResponseWriter, r *Request, modtime time.Time) bool {
-	if modtime.IsZero() {
+	if modtime.IsZero() || modtime.Equal(unixEpochTime) {
+		// If the file doesn't have a modtime (IsZero), or the modtime
+		// is obviously garbage (Unix time == 0), then ignore modtimes
+		// and don't process the If-Modified-Since header.
 		return false
 	}
 
@@ -353,16 +358,16 @@ func serveFile(w ResponseWriter, r *Request, fs FileSystem, name string, redirec
 
 	f, err := fs.Open(name)
 	if err != nil {
-		// TODO expose actual error?
-		NotFound(w, r)
+		msg, code := toHTTPError(err)
+		Error(w, msg, code)
 		return
 	}
 	defer f.Close()
 
 	d, err1 := f.Stat()
 	if err1 != nil {
-		// TODO expose actual error?
-		NotFound(w, r)
+		msg, code := toHTTPError(err)
+		Error(w, msg, code)
 		return
 	}
 
@@ -410,6 +415,22 @@ func serveFile(w ResponseWriter, r *Request, fs FileSystem, name string, redirec
 	// serveContent will check modification time
 	sizeFunc := func() (int64, error) { return d.Size(), nil }
 	serveContent(w, r, d.Name(), d.ModTime(), sizeFunc, f)
+}
+
+// toHTTPError returns a non-specific HTTP error message and status code
+// for a given non-nil error value. It's important that toHTTPError does not
+// actually return err.Error(), since msg and httpStatus are returned to users,
+// and historically Go's ServeContent always returned just "404 Not Found" for
+// all errors. We don't want to start leaking information in error messages.
+func toHTTPError(err error) (msg string, httpStatus int) {
+	if os.IsNotExist(err) {
+		return "404 page not found", StatusNotFound
+	}
+	if os.IsPermission(err) {
+		return "403 Forbidden", StatusForbidden
+	}
+	// Default:
+	return "500 Internal Server Error", StatusInternalServerError
 }
 
 // localRedirect gives a Moved Permanently response.
@@ -503,7 +524,7 @@ func parseRange(s string, size int64) ([]httpRange, error) {
 			r.length = size - r.start
 		} else {
 			i, err := strconv.ParseInt(start, 10, 64)
-			if err != nil || i > size || i < 0 {
+			if err != nil || i >= size || i < 0 {
 				return nil, errors.New("invalid range")
 			}
 			r.start = i

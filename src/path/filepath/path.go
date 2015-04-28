@@ -4,6 +4,9 @@
 
 // Package filepath implements utility routines for manipulating filename paths
 // in a way compatible with the target operating system-defined file paths.
+//
+// Functions in this package replace any occurrences of the slash ('/') character
+// with os.PathSeparator when returning paths unless otherwise specified.
 package filepath
 
 import (
@@ -174,7 +177,8 @@ func FromSlash(path string) string {
 
 // SplitList splits a list of paths joined by the OS-specific ListSeparator,
 // usually found in PATH or GOPATH environment variables.
-// Unlike strings.Split, SplitList returns an empty slice when passed an empty string.
+// Unlike strings.Split, SplitList returns an empty slice when passed an empty
+// string. SplitList does not replace slash characters in the returned paths.
 func SplitList(path string) []string {
 	return splitList(path)
 }
@@ -196,13 +200,10 @@ func Split(path string) (dir, file string) {
 // Join joins any number of path elements into a single path, adding
 // a Separator if necessary. The result is Cleaned, in particular
 // all empty strings are ignored.
+// On Windows, the result is a UNC path if and only if the first path
+// element is a UNC path.
 func Join(elem ...string) string {
-	for i, e := range elem {
-		if e != "" {
-			return Clean(strings.Join(elem[i:], string(Separator)))
-		}
-	}
-	return ""
+	return join(elem)
 }
 
 // Ext returns the file name extension used by path.
@@ -456,9 +457,9 @@ func Dir(path string) string {
 }
 
 // VolumeName returns leading volume name.
-// Given "C:\foo\bar" it returns "C:" under windows.
+// Given "C:\foo\bar" it returns "C:" on Windows.
 // Given "\\host\share\foo" it returns "\\host\share".
 // On other platforms it returns "".
-func VolumeName(path string) (v string) {
+func VolumeName(path string) string {
 	return path[:volumeNameLen(path)]
 }

@@ -108,7 +108,7 @@ var (
 	IPv6linklocalallrouters    = IP{0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02}
 )
 
-// IsUnspecified returns true if ip is an unspecified address.
+// IsUnspecified reports whether ip is an unspecified address.
 func (ip IP) IsUnspecified() bool {
 	if ip.Equal(IPv4zero) || ip.Equal(IPv6unspecified) {
 		return true
@@ -116,7 +116,7 @@ func (ip IP) IsUnspecified() bool {
 	return false
 }
 
-// IsLoopback returns true if ip is a loopback address.
+// IsLoopback reports whether ip is a loopback address.
 func (ip IP) IsLoopback() bool {
 	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 127 {
 		return true
@@ -124,7 +124,7 @@ func (ip IP) IsLoopback() bool {
 	return ip.Equal(IPv6loopback)
 }
 
-// IsMulticast returns true if ip is a multicast address.
+// IsMulticast reports whether ip is a multicast address.
 func (ip IP) IsMulticast() bool {
 	if ip4 := ip.To4(); ip4 != nil && ip4[0]&0xf0 == 0xe0 {
 		return true
@@ -132,13 +132,13 @@ func (ip IP) IsMulticast() bool {
 	return ip[0] == 0xff
 }
 
-// IsInterfaceLinkLocalMulticast returns true if ip is
+// IsInterfaceLocalMulticast reports whether ip is
 // an interface-local multicast address.
 func (ip IP) IsInterfaceLocalMulticast() bool {
 	return len(ip) == IPv6len && ip[0] == 0xff && ip[1]&0x0f == 0x01
 }
 
-// IsLinkLocalMulticast returns true if ip is a link-local
+// IsLinkLocalMulticast reports whether ip is a link-local
 // multicast address.
 func (ip IP) IsLinkLocalMulticast() bool {
 	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 224 && ip4[1] == 0 && ip4[2] == 0 {
@@ -147,7 +147,7 @@ func (ip IP) IsLinkLocalMulticast() bool {
 	return ip[0] == 0xff && ip[1]&0x0f == 0x02
 }
 
-// IsLinkLocalUnicast returns true if ip is a link-local
+// IsLinkLocalUnicast reports whether ip is a link-local
 // unicast address.
 func (ip IP) IsLinkLocalUnicast() bool {
 	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 169 && ip4[1] == 254 {
@@ -156,7 +156,7 @@ func (ip IP) IsLinkLocalUnicast() bool {
 	return ip[0] == 0xfe && ip[1]&0xc0 == 0x80
 }
 
-// IsGlobalUnicast returns true if ip is a global unicast
+// IsGlobalUnicast reports whether ip is a global unicast
 // address.
 func (ip IP) IsGlobalUnicast() bool {
 	return !ip.IsUnspecified() &&
@@ -267,10 +267,10 @@ func (ip IP) String() string {
 
 	// If IPv4, use dotted notation.
 	if p4 := p.To4(); len(p4) == IPv4len {
-		return itod(uint(p4[0])) + "." +
-			itod(uint(p4[1])) + "." +
-			itod(uint(p4[2])) + "." +
-			itod(uint(p4[3]))
+		return uitoa(uint(p4[0])) + "." +
+			uitoa(uint(p4[1])) + "." +
+			uitoa(uint(p4[2])) + "." +
+			uitoa(uint(p4[3]))
 	}
 	if len(p) != IPv6len {
 		return "?"
@@ -352,7 +352,7 @@ func (ip *IP) UnmarshalText(text []byte) error {
 	return nil
 }
 
-// Equal returns true if ip and x are the same IP address.
+// Equal reports whether ip and x are the same IP address.
 // An IPv4 address and that same address in IPv6 form are
 // considered to be equal.
 func (ip IP) Equal(x IP) bool {
@@ -491,7 +491,7 @@ func (n *IPNet) String() string {
 	if l == -1 {
 		return nn.String() + "/" + m.String()
 	}
-	return nn.String() + "/" + itod(uint(l))
+	return nn.String() + "/" + uitoa(uint(l))
 }
 
 // Parse IPv4 address (d.d.d.d).

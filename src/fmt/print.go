@@ -789,6 +789,8 @@ func (p *pp) printArg(arg interface{}, verb rune, depth int) (wasString bool) {
 	case []byte:
 		p.fmtBytes(f, verb, nil, depth)
 		wasString = verb == 's'
+	case reflect.Value:
+		return p.printReflectValue(f, verb, depth)
 	default:
 		// If the type is not simple, it might have methods.
 		if handled := p.handleMethods(verb, depth); handled {
@@ -845,6 +847,8 @@ func (p *pp) printReflectValue(value reflect.Value, verb rune, depth int) (wasSt
 	p.value = value
 BigSwitch:
 	switch f := value; f.Kind() {
+	case reflect.Invalid:
+		p.buf.WriteString("<invalid reflect.Value>")
 	case reflect.Bool:
 		p.fmtBool(f.Bool(), verb)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:

@@ -43,13 +43,6 @@ func (a *IPAddr) family() int {
 	return syscall.AF_INET6
 }
 
-func (a *IPAddr) isWildcard() bool {
-	if a == nil || a.IP == nil {
-		return true
-	}
-	return a.IP.IsUnspecified()
-}
-
 func (a *IPAddr) sockaddr(family int) (syscall.Sockaddr, error) {
 	if a == nil {
 		return nil, nil
@@ -83,15 +76,29 @@ func (c *IPConn) ReadFromIP(b []byte) (int, *IPAddr, error) {
 	switch sa := sa.(type) {
 	case *syscall.SockaddrInet4:
 		addr = &IPAddr{IP: sa.Addr[0:]}
-		if len(b) >= IPv4len { // discard ipv4 header
-			hsize := (int(b[0]) & 0xf) * 4
-			copy(b, b[hsize:])
-			n -= hsize
-		}
+		n = stripIPv4Header(n, b)
 	case *syscall.SockaddrInet6:
 		addr = &IPAddr{IP: sa.Addr[0:], Zone: zoneToString(int(sa.ZoneId))}
 	}
+	if err != nil {
+		err = &OpError{Op: "read", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+	}
 	return n, addr, err
+}
+
+func stripIPv4Header(n int, b []byte) int {
+	if len(b) < 20 {
+		return n
+	}
+	l := int(b[0]&0x0f) << 2
+	if 20 > l || l > len(b) {
+		return n
+	}
+	if b[0]>>4 != 4 {
+		return n
+	}
+	copy(b, b[l:])
+	return n - l
 }
 
 // ReadFrom implements the PacketConn ReadFrom method.
@@ -100,7 +107,10 @@ func (c *IPConn) ReadFrom(b []byte) (int, Addr, error) {
 		return 0, nil, syscall.EINVAL
 	}
 	n, addr, err := c.ReadFromIP(b)
-	return n, addr.toAddr(), err
+	if addr == nil {
+		return n, nil, err
+	}
+	return n, addr, err
 }
 
 // ReadMsgIP reads a packet from c, copying the payload into b and the
@@ -118,6 +128,9 @@ func (c *IPConn) ReadMsgIP(b, oob []byte) (n, oobn, flags int, addr *IPAddr, err
 		addr = &IPAddr{IP: sa.Addr[0:]}
 	case *syscall.SockaddrInet6:
 		addr = &IPAddr{IP: sa.Addr[0:], Zone: zoneToString(int(sa.ZoneId))}
+	}
+	if err != nil {
+		err = &OpError{Op: "read", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
 	}
 	return
 }
@@ -141,9 +154,13 @@ func (c *IPConn) WriteToIP(b []byte, addr *IPAddr) (int, error) {
 	}
 	sa, err := addr.sockaddr(c.fd.family)
 	if err != nil {
-		return 0, &OpError{"write", c.fd.net, addr, err}
+		return 0, &OpError{Op: "write", Net: c.fd.net, Addr: addr, Err: err}
 	}
-	return c.fd.writeTo(b, sa)
+	n, err := c.fd.writeTo(b, sa)
+	if err != nil {
+		err = &OpError{Op: "write", Net: c.fd.net, Addr: addr, Err: err}
+	}
+	return n, err
 }
 
 // WriteTo implements the PacketConn WriteTo method.
@@ -153,7 +170,7 @@ func (c *IPConn) WriteTo(b []byte, addr Addr) (int, error) {
 	}
 	a, ok := addr.(*IPAddr)
 	if !ok {
-		return 0, &OpError{"write", c.fd.net, addr, syscall.EINVAL}
+		return 0, &OpError{Op: "write", Net: c.fd.net, Addr: addr, Err: syscall.EINVAL}
 	}
 	return c.WriteToIP(b, a)
 }
@@ -171,11 +188,16 @@ func (c *IPConn) WriteMsgIP(b, oob []byte, addr *IPAddr) (n, oobn int, err error
 	if addr == nil {
 		return 0, 0, &OpError{Op: "write", Net: c.fd.net, Addr: nil, Err: errMissingAddress}
 	}
-	sa, err := addr.sockaddr(c.fd.family)
+	var sa syscall.Sockaddr
+	sa, err = addr.sockaddr(c.fd.family)
 	if err != nil {
-		return 0, 0, &OpError{"write", c.fd.net, addr, err}
+		return 0, 0, &OpError{Op: "write", Net: c.fd.net, Addr: addr, Err: err}
 	}
-	return c.fd.writeMsg(b, oob, sa)
+	n, oobn, err = c.fd.writeMsg(b, oob, sa)
+	if err != nil {
+		err = &OpError{Op: "write", Net: c.fd.net, Addr: addr, Err: err}
+	}
+	return
 }
 
 // DialIP connects to the remote address raddr on the network protocol

@@ -146,6 +146,7 @@ func (ht handlerTest) rawResponse(req string) string {
 }
 
 func TestConsumingBodyOnNextConn(t *testing.T) {
+	defer afterTest(t)
 	conn := new(testConn)
 	for i := 0; i < 2; i++ {
 		conn.readBuf.Write([]byte(
@@ -416,7 +417,7 @@ func TestServeMuxHandlerRedirects(t *testing.T) {
 	}
 }
 
-// Tests for http://code.google.com/p/go/issues/detail?id=900
+// Tests for http://golang.org/issue/900
 func TestMuxRedirectLeadingSlashes(t *testing.T) {
 	paths := []string{"//foo.txt", "///foo.txt", "/../../foo.txt"}
 	for _, path := range paths {
@@ -2124,7 +2125,7 @@ func TestDoubleHijack(t *testing.T) {
 	<-conn.closec
 }
 
-// http://code.google.com/p/go/issues/detail?id=5955
+// http://golang.org/issue/5955
 // Note that this does not test the "request too large"
 // exit path from the http server. This is intentional;
 // not sending Connection: close is just a minor wire
@@ -2384,18 +2385,24 @@ func TestRequestBodyCloseDoesntBlock(t *testing.T) {
 	}
 }
 
-func TestResponseWriterWriteStringAllocs(t *testing.T) {
+// test that ResponseWriter implements io.stringWriter.
+func TestResponseWriterWriteString(t *testing.T) {
+	okc := make(chan bool, 1)
 	ht := newHandlerTest(HandlerFunc(func(w ResponseWriter, r *Request) {
-		if r.URL.Path == "/s" {
-			io.WriteString(w, "Hello world")
-		} else {
-			w.Write([]byte("Hello world"))
+		type stringWriter interface {
+			WriteString(s string) (n int, err error)
 		}
+		_, ok := w.(stringWriter)
+		okc <- ok
 	}))
-	before := testing.AllocsPerRun(50, func() { ht.rawResponse("GET / HTTP/1.0") })
-	after := testing.AllocsPerRun(50, func() { ht.rawResponse("GET /s HTTP/1.0") })
-	if int(after) >= int(before) {
-		t.Errorf("WriteString allocs of %v >= Write allocs of %v", after, before)
+	ht.rawResponse("GET / HTTP/1.0")
+	select {
+	case ok := <-okc:
+		if !ok {
+			t.Error("ResponseWriter did not implement io.stringWriter")
+		}
+	default:
+		t.Error("handler was never called")
 	}
 }
 
@@ -2885,7 +2892,7 @@ func BenchmarkServer(b *testing.B) {
 	defer ts.Close()
 	b.StartTimer()
 
-	cmd := exec.Command(os.Args[0], "-test.run=XXXX", "-test.bench=BenchmarkServer")
+	cmd := exec.Command(os.Args[0], "-test.run=XXXX", "-test.bench=BenchmarkServer$")
 	cmd.Env = append([]string{
 		fmt.Sprintf("TEST_BENCH_CLIENT_N=%d", b.N),
 		fmt.Sprintf("TEST_BENCH_SERVER_URL=%s", ts.URL),
@@ -2893,6 +2900,95 @@ func BenchmarkServer(b *testing.B) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		b.Errorf("Test failure: %v, with output: %s", err, out)
+	}
+}
+
+// getNoBody wraps Get but closes any Response.Body before returning the response.
+func getNoBody(urlStr string) (*Response, error) {
+	res, err := Get(urlStr)
+	if err != nil {
+		return nil, err
+	}
+	res.Body.Close()
+	return res, nil
+}
+
+// A benchmark for profiling the client without the HTTP server code.
+// The server code runs in a subprocess.
+func BenchmarkClient(b *testing.B) {
+	b.ReportAllocs()
+	b.StopTimer()
+	defer afterTest(b)
+
+	port := os.Getenv("TEST_BENCH_SERVER_PORT") // can be set by user
+	if port == "" {
+		port = "39207"
+	}
+	var data = []byte("Hello world.\n")
+	if server := os.Getenv("TEST_BENCH_SERVER"); server != "" {
+		// Server process mode.
+		HandleFunc("/", func(w ResponseWriter, r *Request) {
+			r.ParseForm()
+			if r.Form.Get("stop") != "" {
+				os.Exit(0)
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Write(data)
+		})
+		log.Fatal(ListenAndServe("localhost:"+port, nil))
+	}
+
+	// Start server process.
+	cmd := exec.Command(os.Args[0], "-test.run=XXXX", "-test.bench=BenchmarkClient$")
+	cmd.Env = append(os.Environ(), "TEST_BENCH_SERVER=yes")
+	if err := cmd.Start(); err != nil {
+		b.Fatalf("subprocess failed to start: %v", err)
+	}
+	defer cmd.Process.Kill()
+	done := make(chan error)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	// Wait for the server process to respond.
+	url := "http://localhost:" + port + "/"
+	for i := 0; i < 100; i++ {
+		time.Sleep(50 * time.Millisecond)
+		if _, err := getNoBody(url); err == nil {
+			break
+		}
+		if i == 99 {
+			b.Fatalf("subprocess does not respond")
+		}
+	}
+
+	// Do b.N requests to the server.
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		res, err := Get(url)
+		if err != nil {
+			b.Fatalf("Get: %v", err)
+		}
+		body, err := ioutil.ReadAll(res.Body)
+		res.Body.Close()
+		if err != nil {
+			b.Fatalf("ReadAll: %v", err)
+		}
+		if bytes.Compare(body, data) != 0 {
+			b.Fatalf("Got body: %q", body)
+		}
+	}
+	b.StopTimer()
+
+	// Instruct server process to stop.
+	getNoBody(url + "?stop=yes")
+	select {
+	case err := <-done:
+		if err != nil {
+			b.Fatalf("subprocess failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		b.Fatalf("subprocess did not stop")
 	}
 }
 

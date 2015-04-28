@@ -8,35 +8,17 @@
 package net
 
 import (
-	"io/ioutil"
 	"os"
 	"runtime"
 	"testing"
 	"time"
 )
 
-// testUnixAddr uses ioutil.TempFile to get a name that is unique. It
-// also uses /tmp directory in case it is prohibited to create UNIX
-// sockets in TMPDIR.
-func testUnixAddr() string {
-	f, err := ioutil.TempFile("", "nettest")
-	if err != nil {
-		panic(err)
-	}
-	addr := f.Name()
-	f.Close()
-	os.Remove(addr)
-	return addr
-}
-
-var condFatalf = func() func(*testing.T, string, ...interface{}) {
-	// A few APIs are not implemented yet on both Plan 9 and Windows.
-	switch runtime.GOOS {
-	case "plan9", "windows":
-		return (*testing.T).Logf
-	}
-	return (*testing.T).Fatalf
-}()
+// The full stack test cases for IPConn have been moved to the
+// following:
+//	golang.org/x/net/ipv4
+//	golang.org/x/net/ipv6
+//	golang.org/x/net/icmp
 
 func TestTCPListenerSpecificMethods(t *testing.T) {
 	switch runtime.GOOS {
@@ -87,13 +69,18 @@ func TestTCPConnSpecificMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListenTCP failed: %v", err)
 	}
-	defer ln.Close()
-	ln.Addr()
+	ch := make(chan error, 1)
+	handler := func(ls *localServer, ln Listener) { transponder(ls.Listener, ch) }
+	ls, err := (&streamListener{Listener: ln}).newLocalServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ls.teardown()
+	if err := ls.buildup(handler); err != nil {
+		t.Fatal(err)
+	}
 
-	done := make(chan int)
-	go transponder(t, ln, done)
-
-	ra, err := ResolveTCPAddr("tcp4", ln.Addr().String())
+	ra, err := ResolveTCPAddr("tcp4", ls.Listener.Addr().String())
 	if err != nil {
 		t.Fatalf("ResolveTCPAddr failed: %v", err)
 	}
@@ -120,7 +107,9 @@ func TestTCPConnSpecificMethods(t *testing.T) {
 		t.Fatalf("TCPConn.Read failed: %v", err)
 	}
 
-	<-done
+	for err := range ch {
+		t.Error(err)
+	}
 }
 
 func TestUDPConnSpecificMethods(t *testing.T) {
@@ -173,8 +162,8 @@ func TestUDPConnSpecificMethods(t *testing.T) {
 }
 
 func TestIPConnSpecificMethods(t *testing.T) {
-	if skip, skipmsg := skipRawSocketTest(t); skip {
-		t.Skip(skipmsg)
+	if os.Getuid() != 0 {
+		t.Skip("must be root")
 	}
 
 	la, err := ResolveIPAddr("ip4", "127.0.0.1")
@@ -194,30 +183,6 @@ func TestIPConnSpecificMethods(t *testing.T) {
 	c.SetReadBuffer(2048)
 	c.SetWriteBuffer(2048)
 
-	wb, err := (&icmpMessage{
-		Type: icmpv4EchoRequest, Code: 0,
-		Body: &icmpEcho{
-			ID: os.Getpid() & 0xffff, Seq: 1,
-			Data: []byte("IPCONN TEST "),
-		},
-	}).Marshal()
-	if err != nil {
-		t.Fatalf("icmpMessage.Marshal failed: %v", err)
-	}
-	rb := make([]byte, 20+len(wb))
-	if _, err := c.WriteToIP(wb, c.LocalAddr().(*IPAddr)); err != nil {
-		t.Fatalf("IPConn.WriteToIP failed: %v", err)
-	}
-	if _, _, err := c.ReadFromIP(rb); err != nil {
-		t.Fatalf("IPConn.ReadFromIP failed: %v", err)
-	}
-	if _, _, err := c.WriteMsgIP(wb, nil, c.LocalAddr().(*IPAddr)); err != nil {
-		condFatalf(t, "IPConn.WriteMsgIP failed: %v", err)
-	}
-	if _, _, _, _, err := c.ReadMsgIP(rb, nil); err != nil {
-		condFatalf(t, "IPConn.ReadMsgIP failed: %v", err)
-	}
-
 	if f, err := c.File(); err != nil {
 		condFatalf(t, "IPConn.File failed: %v", err)
 	} else {
@@ -230,14 +195,14 @@ func TestIPConnSpecificMethods(t *testing.T) {
 		}
 	}()
 
+	wb := []byte("IPCONN TEST")
 	c.WriteToIP(wb, nil)
 	c.WriteMsgIP(wb, nil, nil)
 }
 
 func TestUnixListenerSpecificMethods(t *testing.T) {
-	switch runtime.GOOS {
-	case "nacl", "plan9", "windows":
-		t.Skipf("skipping test on %q", runtime.GOOS)
+	if !testableNetwork("unix") {
+		t.Skip("unix test")
 	}
 
 	addr := testUnixAddr()
@@ -277,9 +242,8 @@ func TestUnixListenerSpecificMethods(t *testing.T) {
 }
 
 func TestUnixConnSpecificMethods(t *testing.T) {
-	switch runtime.GOOS {
-	case "nacl", "plan9", "windows":
-		t.Skipf("skipping test on %q", runtime.GOOS)
+	if !testableNetwork("unixgram") {
+		t.Skip("unixgram test")
 	}
 
 	addr1, addr2, addr3 := testUnixAddr(), testUnixAddr(), testUnixAddr()

@@ -118,6 +118,14 @@ func Value(t reflect.Type, rand *rand.Rand) (value reflect.Value, ok bool) {
 			}
 			v.Index(i).Set(elem)
 		}
+	case reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			elem, ok := Value(concrete.Elem(), rand)
+			if !ok {
+				return reflect.Value{}, false
+			}
+			v.Index(i).Set(elem)
+		}
 	case reflect.String:
 		numChars := rand.Intn(complexSize)
 		codePoints := make([]rune, numChars)
@@ -153,7 +161,7 @@ type Config struct {
 	Rand *rand.Rand
 	// If non-nil, the Values function generates a slice of arbitrary
 	// reflect.Values that are congruent with the arguments to the function
-	// being tested. Otherwise, the top-level Values function is used
+	// being tested. Otherwise, the top-level Value function is used
 	// to generate them.
 	Values func([]reflect.Value, *rand.Rand)
 }

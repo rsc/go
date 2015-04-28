@@ -23,7 +23,7 @@ func equalPortable(a, b []byte) bool {
 	return true
 }
 
-// explode splits s into a slice of UTF-8 sequences, one per Unicode character (still slices of bytes),
+// explode splits s into a slice of UTF-8 sequences, one per Unicode code point (still slices of bytes),
 // up to a maximum of n byte slices. Invalid UTF-8 sequences are chopped into individual bytes.
 func explode(s []byte, n int) [][]byte {
 	if n <= 0 {
@@ -47,6 +47,7 @@ func explode(s []byte, n int) [][]byte {
 }
 
 // Count counts the number of non-overlapping instances of sep in s.
+// If sep is an empty slice, Count returns 1 + the number of Unicode code points in s.
 func Count(s, sep []byte) int {
 	n := len(sep)
 	if n == 0 {
@@ -442,7 +443,7 @@ func isSeparator(r rune) bool {
 // Title returns a copy of s with all Unicode letters that begin words
 // mapped to their title case.
 //
-// BUG: The rule Title uses for word boundaries does not handle Unicode punctuation properly.
+// BUG(rsc): The rule Title uses for word boundaries does not handle Unicode punctuation properly.
 func Title(s []byte) []byte {
 	// Use a closure here to remember state.
 	// Hackish but effective. Depends on Map scanning in order and calling

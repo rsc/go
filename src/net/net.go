@@ -38,9 +38,6 @@ The Listen function creates servers:
 */
 package net
 
-// TODO(rsc):
-//	support for raw ethernet sockets
-
 import (
 	"errors"
 	"io"
@@ -48,6 +45,12 @@ import (
 	"syscall"
 	"time"
 )
+
+func init() {
+	sysInit()
+	supportsIPv4 = probeIPv4Stack()
+	supportsIPv6, supportsIPv4map = probeIPv6Stack()
+}
 
 // Addr represents a network end point address.
 type Addr interface {
@@ -118,7 +121,16 @@ func (c *conn) Read(b []byte) (int, error) {
 	if !c.ok() {
 		return 0, syscall.EINVAL
 	}
-	return c.fd.Read(b)
+	n, err := c.fd.Read(b)
+	if err != nil && err != io.EOF {
+		err = &OpError{Op: "read", Net: c.fd.net, Err: err}
+		if c.fd.raddr != nil {
+			err.(*OpError).Addr = c.fd.raddr
+		} else {
+			err.(*OpError).Addr = c.fd.laddr // for unconnected-mode sockets
+		}
+	}
+	return n, err
 }
 
 // Write implements the Conn Write method.
@@ -126,7 +138,16 @@ func (c *conn) Write(b []byte) (int, error) {
 	if !c.ok() {
 		return 0, syscall.EINVAL
 	}
-	return c.fd.Write(b)
+	n, err := c.fd.Write(b)
+	if err != nil {
+		err = &OpError{Op: "write", Net: c.fd.net, Err: err}
+		if c.fd.raddr != nil {
+			err.(*OpError).Addr = c.fd.raddr
+		} else {
+			err.(*OpError).Addr = c.fd.laddr // for unconnected-mode sockets
+		}
+	}
+	return n, err
 }
 
 // Close closes the connection.
@@ -134,10 +155,21 @@ func (c *conn) Close() error {
 	if !c.ok() {
 		return syscall.EINVAL
 	}
-	return c.fd.Close()
+	err := c.fd.Close()
+	if err != nil {
+		err = &OpError{Op: "close", Net: c.fd.net, Err: err}
+		if c.fd.raddr != nil {
+			err.(*OpError).Addr = c.fd.raddr
+		} else {
+			err.(*OpError).Addr = c.fd.laddr // for unconnected-mode sockets
+		}
+	}
+	return err
 }
 
 // LocalAddr returns the local network address.
+// The Addr returned is shared by all invocations of LocalAddr, so
+// do not modify it.
 func (c *conn) LocalAddr() Addr {
 	if !c.ok() {
 		return nil
@@ -146,6 +178,8 @@ func (c *conn) LocalAddr() Addr {
 }
 
 // RemoteAddr returns the remote network address.
+// The Addr returned is shared by all invocations of RemoteAddr, so
+// do not modify it.
 func (c *conn) RemoteAddr() Addr {
 	if !c.ok() {
 		return nil
@@ -158,7 +192,10 @@ func (c *conn) SetDeadline(t time.Time) error {
 	if !c.ok() {
 		return syscall.EINVAL
 	}
-	return c.fd.setDeadline(t)
+	if err := c.fd.setDeadline(t); err != nil {
+		return &OpError{Op: "set", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+	}
+	return nil
 }
 
 // SetReadDeadline implements the Conn SetReadDeadline method.
@@ -166,7 +203,10 @@ func (c *conn) SetReadDeadline(t time.Time) error {
 	if !c.ok() {
 		return syscall.EINVAL
 	}
-	return c.fd.setReadDeadline(t)
+	if err := c.fd.setReadDeadline(t); err != nil {
+		return &OpError{Op: "set", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+	}
+	return nil
 }
 
 // SetWriteDeadline implements the Conn SetWriteDeadline method.
@@ -174,7 +214,10 @@ func (c *conn) SetWriteDeadline(t time.Time) error {
 	if !c.ok() {
 		return syscall.EINVAL
 	}
-	return c.fd.setWriteDeadline(t)
+	if err := c.fd.setWriteDeadline(t); err != nil {
+		return &OpError{Op: "set", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+	}
+	return nil
 }
 
 // SetReadBuffer sets the size of the operating system's
@@ -183,7 +226,10 @@ func (c *conn) SetReadBuffer(bytes int) error {
 	if !c.ok() {
 		return syscall.EINVAL
 	}
-	return setReadBuffer(c.fd, bytes)
+	if err := setReadBuffer(c.fd, bytes); err != nil {
+		return &OpError{Op: "set", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+	}
+	return nil
 }
 
 // SetWriteBuffer sets the size of the operating system's
@@ -192,7 +238,10 @@ func (c *conn) SetWriteBuffer(bytes int) error {
 	if !c.ok() {
 		return syscall.EINVAL
 	}
-	return setWriteBuffer(c.fd, bytes)
+	if err := setWriteBuffer(c.fd, bytes); err != nil {
+		return &OpError{Op: "set", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+	}
+	return nil
 }
 
 // File sets the underlying os.File to blocking mode and returns a copy.
@@ -202,7 +251,13 @@ func (c *conn) SetWriteBuffer(bytes int) error {
 // The returned os.File's file descriptor is different from the connection's.
 // Attempting to change properties of the original using this duplicate
 // may or may not have the desired effect.
-func (c *conn) File() (f *os.File, err error) { return c.fd.dup() }
+func (c *conn) File() (f *os.File, err error) {
+	f, err = c.fd.dup()
+	if err != nil {
+		err = &OpError{Op: "file", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+	}
+	return
+}
 
 // An Error represents a network error.
 type Error interface {
@@ -361,13 +416,8 @@ func (e *AddrError) Error() string {
 	return s
 }
 
-func (e *AddrError) Temporary() bool {
-	return false
-}
-
-func (e *AddrError) Timeout() bool {
-	return false
-}
+func (e *AddrError) Temporary() bool { return false }
+func (e *AddrError) Timeout() bool   { return false }
 
 type UnknownNetworkError string
 
@@ -386,12 +436,44 @@ type DNSConfigError struct {
 	Err error
 }
 
-func (e *DNSConfigError) Error() string {
-	return "error reading DNS config: " + e.Err.Error()
-}
-
+func (e *DNSConfigError) Error() string   { return "error reading DNS config: " + e.Err.Error() }
 func (e *DNSConfigError) Timeout() bool   { return false }
 func (e *DNSConfigError) Temporary() bool { return false }
+
+// Various errors contained in DNSError.
+var (
+	errNoSuchHost = errors.New("no such host")
+)
+
+// DNSError represents a DNS lookup error.
+type DNSError struct {
+	Err       string // description of the error
+	Name      string // name looked for
+	Server    string // server used
+	IsTimeout bool   // if true, timed out; not all timeouts set this
+}
+
+func (e *DNSError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	s := "lookup " + e.Name
+	if e.Server != "" {
+		s += " on " + e.Server
+	}
+	s += ": " + e.Err
+	return s
+}
+
+// Timeout reports whether the DNS lookup is known to have timed out.
+// This is not always known; a DNS lookup may fail due to a timeout
+// and return a DNSError for which Timeout returns false.
+func (e *DNSError) Timeout() bool { return e.IsTimeout }
+
+// Temporary reports whether the DNS error is known to be temporary.
+// This is not always known; a DNS lookup may fail due to a temporary
+// error and return a DNSError for which Temporary returns false.
+func (e *DNSError) Temporary() bool { return e.IsTimeout }
 
 type writerOnly struct {
 	io.Writer
@@ -411,10 +493,6 @@ func genericReadFrom(w io.Writer, r io.Reader) (n int64, err error) {
 // thread, and the system or the program runs out of threads.
 
 var threadLimit = make(chan struct{}, 500)
-
-// Using send for acquire is fine here because we are not using this
-// to protect any memory. All we care about is the number of goroutines
-// making calls at a time.
 
 func acquireThread() {
 	threadLimit <- struct{}{}

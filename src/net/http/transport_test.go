@@ -39,6 +39,7 @@ var hostPortHandler = HandlerFunc(func(w ResponseWriter, r *Request) {
 	if r.FormValue("close") == "true" {
 		w.Header().Set("Connection", "close")
 	}
+	w.Header().Set("X-Saw-Close", fmt.Sprint(r.Close))
 	w.Write([]byte(r.RemoteAddr))
 })
 
@@ -228,6 +229,10 @@ func TestTransportConnectionCloseOnRequest(t *testing.T) {
 			if err != nil {
 				t.Fatalf("error in connectionClose=%v, req #%d, Do: %v", connectionClose, n, err)
 			}
+			if got, want := res.Header.Get("X-Saw-Close"), fmt.Sprint(connectionClose); got != want {
+				t.Errorf("For connectionClose = %v; handler's X-Saw-Close was %v; want %v",
+					connectionClose, got, !connectionClose)
+			}
 			body, err := ioutil.ReadAll(res.Body)
 			if err != nil {
 				t.Fatalf("error in connectionClose=%v, req #%d, ReadAll: %v", connectionClose, n, err)
@@ -247,6 +252,27 @@ func TestTransportConnectionCloseOnRequest(t *testing.T) {
 	}
 
 	connSet.check(t)
+}
+
+// if the Transport's DisableKeepAlives is set, all requests should
+// send Connection: close.
+func TestTransportConnectionCloseOnRequestDisableKeepAlive(t *testing.T) {
+	defer afterTest(t)
+	ts := httptest.NewServer(hostPortHandler)
+	defer ts.Close()
+
+	tr := &Transport{
+		DisableKeepAlives: true,
+	}
+	c := &Client{Transport: tr}
+	res, err := c.Get(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.Header.Get("X-Saw-Close") != "true" {
+		t.Errorf("handler didn't see Connection: close ")
+	}
 }
 
 func TestTransportIdleCacheKeys(t *testing.T) {
@@ -479,12 +505,17 @@ func TestStressSurpriseServerCloses(t *testing.T) {
 
 	tr := &Transport{DisableKeepAlives: false}
 	c := &Client{Transport: tr}
+	defer tr.CloseIdleConnections()
 
 	// Do a bunch of traffic from different goroutines. Send to activityc
 	// after each request completes, regardless of whether it failed.
+	// If these are too high, OS X exhausts its emphemeral ports
+	// and hangs waiting for them to transition TCP states. That's
+	// not what we want to test.  TODO(bradfitz): use an io.Pipe
+	// dialer for this test instead?
 	const (
-		numClients    = 50
-		reqsPerClient = 250
+		numClients    = 20
+		reqsPerClient = 25
 	)
 	activityc := make(chan bool)
 	for i := 0; i < numClients; i++ {
@@ -1345,8 +1376,8 @@ func TestTransportCancelRequest(t *testing.T) {
 	body, err := ioutil.ReadAll(res.Body)
 	d := time.Since(t0)
 
-	if err == nil {
-		t.Error("expected an error reading the body")
+	if err != ExportErrRequestCanceled {
+		t.Errorf("Body.Read error = %v; want errRequestCanceled", err)
 	}
 	if string(body) != "Hello" {
 		t.Errorf("Body = %q; want Hello", body)
@@ -1356,7 +1387,7 @@ func TestTransportCancelRequest(t *testing.T) {
 	}
 	// Verify no outstanding requests after readLoop/writeLoop
 	// goroutines shut down.
-	for tries := 3; tries > 0; tries-- {
+	for tries := 5; tries > 0; tries-- {
 		n := tr.NumPendingRequestsForTesting()
 		if n == 0 {
 			break
@@ -1405,6 +1436,7 @@ func TestTransportCancelRequestInDial(t *testing.T) {
 
 	eventLog.Printf("canceling")
 	tr.CancelRequest(req)
+	tr.CancelRequest(req) // used to panic on second call
 
 	select {
 	case <-gotres:
@@ -2060,6 +2092,38 @@ func TestTransportNoReuseAfterEarlyResponse(t *testing.T) {
 	}
 }
 
+// Tests that we don't leak Transport persistConn.readLoop goroutines
+// when a server hangs up immediately after saying it would keep-alive.
+func TestTransportIssue10457(t *testing.T) {
+	defer afterTest(t) // used to fail in goroutine leak check
+	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
+		// Send a response with no body, keep-alive
+		// (implicit), and then lie and immediately close the
+		// connection. This forces the Transport's readLoop to
+		// immediately Peek an io.EOF and get to the point
+		// that used to hang.
+		conn, _, _ := w.(Hijacker).Hijack()
+		conn.Write([]byte("HTTP/1.1 200 OK\r\nFoo: Bar\r\nContent-Length: 0\r\n\r\n")) // keep-alive
+		conn.Close()
+	}))
+	defer ts.Close()
+	tr := &Transport{}
+	defer tr.CloseIdleConnections()
+	cl := &Client{Transport: tr}
+	res, err := cl.Get(ts.URL)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer res.Body.Close()
+
+	// Just a sanity check that we at least get the response. The real
+	// test here is that the "defer afterTest" above doesn't find any
+	// leaked goroutines.
+	if got, want := res.Header.Get("Foo"), "Bar"; got != want {
+		t.Errorf("Foo header = %q; want %q", got, want)
+	}
+}
+
 type errorReader struct {
 	err error
 }
@@ -2247,6 +2311,119 @@ func TestTransportRangeAndGzip(t *testing.T) {
 		t.Fatal("timeout")
 	}
 	res.Body.Close()
+}
+
+// Previously, we used to handle a logical race within RoundTrip by waiting for 100ms
+// in the case of an error. Changing the order of the channel operations got rid of this
+// race.
+//
+// In order to test that the channel op reordering works, we install a hook into the
+// roundTrip function which gets called if we saw the connection go away and
+// we subsequently received a response.
+func TestTransportResponseCloseRace(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	defer afterTest(t)
+
+	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
+	}))
+	defer ts.Close()
+	sawRace := false
+	SetInstallConnClosedHook(func() {
+		sawRace = true
+	})
+	defer SetInstallConnClosedHook(nil)
+	tr := &Transport{
+		DisableKeepAlives: true,
+	}
+	req, err := NewRequest("GET", ts.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// selects are not deterministic, so do this a bunch
+	// and see if we handle the logical race at least once.
+	for i := 0; i < 10000; i++ {
+		resp, err := tr.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+			continue
+		}
+		resp.Body.Close()
+		if sawRace {
+			break
+		}
+	}
+	if !sawRace {
+		t.Errorf("didn't see response/connection going away race")
+	}
+}
+
+// Test for issue 10474
+func TestTransportResponseCancelRace(t *testing.T) {
+	defer afterTest(t)
+
+	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
+		// important that this response has a body.
+		var b [1024]byte
+		w.Write(b[:])
+	}))
+	defer ts.Close()
+
+	tr := &Transport{}
+	defer tr.CloseIdleConnections()
+
+	req, err := NewRequest("GET", ts.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// If we do an early close, Transport just throws the connection away and
+	// doesn't reuse it. In order to trigger the bug, it has to reuse the connection
+	// so read the body
+	if _, err := io.Copy(ioutil.Discard, res.Body); err != nil {
+		t.Fatal(err)
+	}
+
+	req2, err := NewRequest("GET", ts.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.CancelRequest(req)
+	res, err = tr.RoundTrip(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+}
+
+func TestTransportDialCancelRace(t *testing.T) {
+	defer afterTest(t)
+
+	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {}))
+	defer ts.Close()
+
+	tr := &Transport{}
+	defer tr.CloseIdleConnections()
+
+	req, err := NewRequest("GET", ts.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetEnterRoundTripHook(func() {
+		tr.CancelRequest(req)
+	})
+	defer SetEnterRoundTripHook(nil)
+	res, err := tr.RoundTrip(req)
+	if err != ExportErrRequestCanceled {
+		t.Errorf("expected canceled request error; got %v", err)
+		if err == nil {
+			res.Body.Close()
+		}
+	}
 }
 
 func wantBody(res *http.Response, err error, want string) error {

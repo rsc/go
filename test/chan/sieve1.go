@@ -53,4 +53,7 @@ func main() {
 			panic("fail")
 		}
 	}
+	for i := 0; i < 1000; i++ {
+		<-primes
+	}
 }

@@ -33,6 +33,9 @@ func TestShutdown(t *testing.T) {
 		}
 		var buf [10]byte
 		n, err := c.Read(buf[:])
+		if perr := parseReadError(err); perr != nil {
+			t.Error(perr)
+		}
 		if n != 0 || err != io.EOF {
 			t.Errorf("server Read = %d, %v; want 0, io.EOF", n, err)
 			return
@@ -63,10 +66,10 @@ func TestShutdown(t *testing.T) {
 }
 
 func TestShutdownUnix(t *testing.T) {
-	switch runtime.GOOS {
-	case "nacl", "plan9", "windows":
-		t.Skipf("skipping test on %q", runtime.GOOS)
+	if !testableNetwork("unix") {
+		t.Skip("unix test")
 	}
+
 	f, err := ioutil.TempFile("", "go_net_unixtest")
 	if err != nil {
 		t.Fatalf("TempFile: %s", err)
@@ -91,6 +94,9 @@ func TestShutdownUnix(t *testing.T) {
 		}
 		var buf [10]byte
 		n, err := c.Read(buf[:])
+		if perr := parseReadError(err); perr != nil {
+			t.Error(perr)
+		}
 		if n != 0 || err != io.EOF {
 			t.Errorf("server Read = %d, %v; want 0, io.EOF", n, err)
 			return
@@ -166,6 +172,9 @@ func TestUDPListenClose(t *testing.T) {
 	}()
 	go func() {
 		_, _, err = ln.ReadFrom(buf)
+		if perr := parseReadError(err); perr != nil {
+			t.Error(perr)
+		}
 		if err == nil {
 			t.Error("ReadFrom succeeded")
 		} else {
@@ -221,43 +230,5 @@ func TestTCPClose(t *testing.T) {
 	}
 	if err != nil && err != io.EOF {
 		t.Fatal(err)
-	}
-}
-
-func TestErrorNil(t *testing.T) {
-	c, err := Dial("tcp", "127.0.0.1:65535")
-	if err == nil {
-		t.Fatal("Dial 127.0.0.1:65535 succeeded")
-	}
-	if c != nil {
-		t.Fatalf("Dial returned non-nil interface %T(%v) with err != nil", c, c)
-	}
-
-	// Make Listen fail by relistening on the same address.
-	l, err := Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen 127.0.0.1:0: %v", err)
-	}
-	defer l.Close()
-	l1, err := Listen("tcp", l.Addr().String())
-	if err == nil {
-		t.Fatalf("second Listen %v: %v", l.Addr(), err)
-	}
-	if l1 != nil {
-		t.Fatalf("Listen returned non-nil interface %T(%v) with err != nil", l1, l1)
-	}
-
-	// Make ListenPacket fail by relistening on the same address.
-	lp, err := ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen 127.0.0.1:0: %v", err)
-	}
-	defer lp.Close()
-	lp1, err := ListenPacket("udp", lp.LocalAddr().String())
-	if err == nil {
-		t.Fatalf("second Listen %v: %v", lp.LocalAddr(), err)
-	}
-	if lp1 != nil {
-		t.Fatalf("ListenPacket returned non-nil interface %T(%v) with err != nil", lp1, lp1)
 	}
 }

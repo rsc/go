@@ -35,7 +35,8 @@ type Conn struct {
 	handshakeComplete bool
 	didResume         bool // whether this connection was a session resumption
 	cipherSuite       uint16
-	ocspResponse      []byte // stapled OCSP response
+	ocspResponse      []byte   // stapled OCSP response
+	scts              [][]byte // signed certificate timestamps from server
 	peerCertificates  []*x509.Certificate
 	// verifiedChains contains the certificate chains that we built, as
 	// opposed to the ones presented by the server.
@@ -570,15 +571,11 @@ Again:
 		return c.in.setErrorLocked(fmt.Errorf("tls: oversized record received with length %d", n))
 	}
 	if !c.haveVers {
-		// First message, be extra suspicious:
-		// this might not be a TLS client.
-		// Bail out before reading a full 'body', if possible.
-		// The current max version is 3.1.
-		// If the version is >= 16.0, it's probably not real.
-		// Similarly, a clientHello message encodes in
-		// well under a kilobyte.  If the length is >= 12 kB,
+		// First message, be extra suspicious: this might not be a TLS
+		// client. Bail out before reading a full 'body', if possible.
+		// The current max version is 3.3 so if the version is >= 16.0,
 		// it's probably not real.
-		if (typ != recordTypeAlert && typ != want) || vers >= 0x1000 || n >= 0x3000 {
+		if (typ != recordTypeAlert && typ != want) || vers >= 0x1000 {
 			c.sendAlert(alertUnexpectedMessage)
 			return c.in.setErrorLocked(fmt.Errorf("tls: first record does not look like a TLS handshake"))
 		}
@@ -997,6 +994,8 @@ func (c *Conn) ConnectionState() ConnectionState {
 		state.PeerCertificates = c.peerCertificates
 		state.VerifiedChains = c.verifiedChains
 		state.ServerName = c.serverName
+		state.SignedCertificateTimestamps = c.scts
+		state.OCSPResponse = c.ocspResponse
 		if !c.didResume {
 			state.TLSUnique = c.firstFinished[:]
 		}

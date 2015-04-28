@@ -31,13 +31,6 @@ func (a *UDPAddr) family() int {
 	return syscall.AF_INET6
 }
 
-func (a *UDPAddr) isWildcard() bool {
-	if a == nil || a.IP == nil {
-		return true
-	}
-	return a.IP.IsUnspecified()
-}
-
 func (a *UDPAddr) sockaddr(family int) (syscall.Sockaddr, error) {
 	if a == nil {
 		return nil, nil
@@ -60,10 +53,11 @@ func newUDPConn(fd *netFD) *UDPConn { return &UDPConn{conn{fd}} }
 // ReadFromUDP can be made to time out and return an error with
 // Timeout() == true after a fixed time limit; see SetDeadline and
 // SetReadDeadline.
-func (c *UDPConn) ReadFromUDP(b []byte) (n int, addr *UDPAddr, err error) {
+func (c *UDPConn) ReadFromUDP(b []byte) (int, *UDPAddr, error) {
 	if !c.ok() {
 		return 0, nil, syscall.EINVAL
 	}
+	var addr *UDPAddr
 	n, sa, err := c.fd.readFrom(b)
 	switch sa := sa.(type) {
 	case *syscall.SockaddrInet4:
@@ -71,7 +65,10 @@ func (c *UDPConn) ReadFromUDP(b []byte) (n int, addr *UDPAddr, err error) {
 	case *syscall.SockaddrInet6:
 		addr = &UDPAddr{IP: sa.Addr[0:], Port: sa.Port, Zone: zoneToString(int(sa.ZoneId))}
 	}
-	return
+	if err != nil {
+		err = &OpError{Op: "read", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+	}
+	return n, addr, err
 }
 
 // ReadFrom implements the PacketConn ReadFrom method.
@@ -80,7 +77,10 @@ func (c *UDPConn) ReadFrom(b []byte) (int, Addr, error) {
 		return 0, nil, syscall.EINVAL
 	}
 	n, addr, err := c.ReadFromUDP(b)
-	return n, addr.toAddr(), err
+	if addr == nil {
+		return n, nil, err
+	}
+	return n, addr, err
 }
 
 // ReadMsgUDP reads a packet from c, copying the payload into b and
@@ -100,6 +100,9 @@ func (c *UDPConn) ReadMsgUDP(b, oob []byte) (n, oobn, flags int, addr *UDPAddr, 
 	case *syscall.SockaddrInet6:
 		addr = &UDPAddr{IP: sa.Addr[0:], Port: sa.Port, Zone: zoneToString(int(sa.ZoneId))}
 	}
+	if err != nil {
+		err = &OpError{Op: "read", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
+	}
 	return
 }
 
@@ -115,16 +118,20 @@ func (c *UDPConn) WriteToUDP(b []byte, addr *UDPAddr) (int, error) {
 		return 0, syscall.EINVAL
 	}
 	if c.fd.isConnected {
-		return 0, &OpError{"write", c.fd.net, addr, ErrWriteToConnected}
+		return 0, &OpError{Op: "write", Net: c.fd.net, Addr: addr, Err: ErrWriteToConnected}
 	}
 	if addr == nil {
 		return 0, &OpError{Op: "write", Net: c.fd.net, Addr: nil, Err: errMissingAddress}
 	}
 	sa, err := addr.sockaddr(c.fd.family)
 	if err != nil {
-		return 0, &OpError{"write", c.fd.net, addr, err}
+		return 0, &OpError{Op: "write", Net: c.fd.net, Addr: addr, Err: err}
 	}
-	return c.fd.writeTo(b, sa)
+	n, err := c.fd.writeTo(b, sa)
+	if err != nil {
+		err = &OpError{Op: "write", Net: c.fd.net, Addr: addr, Err: err}
+	}
+	return n, err
 }
 
 // WriteTo implements the PacketConn WriteTo method.
@@ -134,29 +141,36 @@ func (c *UDPConn) WriteTo(b []byte, addr Addr) (int, error) {
 	}
 	a, ok := addr.(*UDPAddr)
 	if !ok {
-		return 0, &OpError{"write", c.fd.net, addr, syscall.EINVAL}
+		return 0, &OpError{Op: "write", Net: c.fd.net, Addr: addr, Err: syscall.EINVAL}
 	}
 	return c.WriteToUDP(b, a)
 }
 
-// WriteMsgUDP writes a packet to addr via c, copying the payload from
-// b and the associated out-of-band data from oob.  It returns the
-// number of payload and out-of-band bytes written.
+// WriteMsgUDP writes a packet to addr via c if c isn't connected, or
+// to c's remote destination address if c is connected (in which case
+// addr must be nil).  The payload is copied from b and the associated
+// out-of-band data is copied from oob.  It returns the number of
+// payload and out-of-band bytes written.
 func (c *UDPConn) WriteMsgUDP(b, oob []byte, addr *UDPAddr) (n, oobn int, err error) {
 	if !c.ok() {
 		return 0, 0, syscall.EINVAL
 	}
-	if c.fd.isConnected {
-		return 0, 0, &OpError{"write", c.fd.net, addr, ErrWriteToConnected}
+	if c.fd.isConnected && addr != nil {
+		return 0, 0, &OpError{Op: "write", Net: c.fd.net, Addr: addr, Err: ErrWriteToConnected}
 	}
-	if addr == nil {
+	if !c.fd.isConnected && addr == nil {
 		return 0, 0, &OpError{Op: "write", Net: c.fd.net, Addr: nil, Err: errMissingAddress}
 	}
-	sa, err := addr.sockaddr(c.fd.family)
+	var sa syscall.Sockaddr
+	sa, err = addr.sockaddr(c.fd.family)
 	if err != nil {
-		return 0, 0, &OpError{"write", c.fd.net, addr, err}
+		return 0, 0, &OpError{Op: "write", Net: c.fd.net, Addr: addr, Err: err}
 	}
-	return c.fd.writeMsg(b, oob, sa)
+	n, oobn, err = c.fd.writeMsg(b, oob, sa)
+	if err != nil {
+		err = &OpError{Op: "write", Net: c.fd.net, Addr: addr, Err: err}
+	}
+	return
 }
 
 // DialUDP connects to the remote address raddr on the network net,

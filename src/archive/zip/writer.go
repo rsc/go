@@ -34,6 +34,17 @@ func NewWriter(w io.Writer) *Writer {
 	return &Writer{cw: &countWriter{w: bufio.NewWriter(w)}}
 }
 
+// SetOffset sets the offset of the beginning of the zip data within the
+// underlying writer. It should be used when the zip data is appended to an
+// existing file, such as a binary executable.
+// It must be called before any data is written.
+func (w *Writer) SetOffset(n int64) {
+	if w.cw.count != 0 {
+		panic("zip: SetOffset called after data was written")
+	}
+	w.cw.count = n
+}
+
 // Flush flushes any buffered data to the underlying writer.
 // Calling Flush is not normally necessary; calling Close is sufficient.
 func (w *Writer) Flush() error {
@@ -122,15 +133,15 @@ func (w *Writer) Close() error {
 
 		// zip64 end of central directory record
 		b.uint32(directory64EndSignature)
-		b.uint64(directory64EndLen)
-		b.uint16(zipVersion45) // version made by
-		b.uint16(zipVersion45) // version needed to extract
-		b.uint32(0)            // number of this disk
-		b.uint32(0)            // number of the disk with the start of the central directory
-		b.uint64(records)      // total number of entries in the central directory on this disk
-		b.uint64(records)      // total number of entries in the central directory
-		b.uint64(size)         // size of the central directory
-		b.uint64(offset)       // offset of start of central directory with respect to the starting disk number
+		b.uint64(directory64EndLen - 12) // length minus signature (uint32) and length fields (uint64)
+		b.uint16(zipVersion45)           // version made by
+		b.uint16(zipVersion45)           // version needed to extract
+		b.uint32(0)                      // number of this disk
+		b.uint32(0)                      // number of the disk with the start of the central directory
+		b.uint64(records)                // total number of entries in the central directory on this disk
+		b.uint64(records)                // total number of entries in the central directory
+		b.uint64(size)                   // size of the central directory
+		b.uint64(offset)                 // offset of start of central directory with respect to the starting disk number
 
 		// zip64 end of central directory locator
 		b.uint32(directory64LocSignature)

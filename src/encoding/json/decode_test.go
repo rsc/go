@@ -231,7 +231,7 @@ var unmarshalTests = []unmarshalTest{
 	{in: `"g-clef: \uD834\uDD1E"`, ptr: new(string), out: "g-clef: \U0001D11E"},
 	{in: `"invalid: \uD834x\uDD1E"`, ptr: new(string), out: "invalid: \uFFFDx\uFFFD"},
 	{in: "null", ptr: new(interface{}), out: nil},
-	{in: `{"X": [1,2,3], "Y": 4}`, ptr: new(T), out: T{Y: 4}, err: &UnmarshalTypeError{"array", reflect.TypeOf("")}},
+	{in: `{"X": [1,2,3], "Y": 4}`, ptr: new(T), out: T{Y: 4}, err: &UnmarshalTypeError{"array", reflect.TypeOf(""), 7}},
 	{in: `{"x": 1}`, ptr: new(tx), out: tx{}},
 	{in: `{"F1":1,"F2":2,"F3":3}`, ptr: new(V), out: V{F1: float64(1), F2: int32(2), F3: Number("3")}},
 	{in: `{"F1":1,"F2":2,"F3":3}`, ptr: new(V), out: V{F1: Number("1"), F2: int32(2), F3: Number("3")}, useNumber: true},
@@ -411,7 +411,7 @@ var unmarshalTests = []unmarshalTest{
 	{
 		in:  `{"2009-11-10T23:00:00Z": "hello world"}`,
 		ptr: &map[time.Time]string{},
-		err: &UnmarshalTypeError{"object", reflect.TypeOf(map[time.Time]string{})},
+		err: &UnmarshalTypeError{"object", reflect.TypeOf(map[time.Time]string{}), 1},
 	},
 }
 
@@ -688,6 +688,7 @@ var wrongStringTests = []wrongStringTest{
 	{`{"result":"x"}`, `json: invalid use of ,string struct tag, trying to unmarshal "x" into string`},
 	{`{"result":"foo"}`, `json: invalid use of ,string struct tag, trying to unmarshal "foo" into string`},
 	{`{"result":"123"}`, `json: invalid use of ,string struct tag, trying to unmarshal "123" into string`},
+	{`{"result":123}`, `json: invalid use of ,string struct tag, trying to unmarshal unquoted value into string`},
 }
 
 // If people misuse the ,string modifier, the error message should be
@@ -1085,7 +1086,7 @@ func TestNullString(t *testing.T) {
 	*s.C = 2
 	err := Unmarshal(data, &s)
 	if err != nil {
-		t.Fatalf("Unmarshal: %v")
+		t.Fatalf("Unmarshal: %v", err)
 	}
 	if s.B != 1 || s.C != nil {
 		t.Fatalf("after Unmarshal, s.B=%d, s.C=%p, want 1, nil", s.B, s.C)

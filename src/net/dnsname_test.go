@@ -69,6 +69,8 @@ func TestDNSNames(t *testing.T) {
 }
 
 func BenchmarkDNSNames(b *testing.B) {
+	testHookUninstaller.Do(func() { uninstallTestHooks() })
+
 	benchmarks := append(tests, []testCase{
 		{strings.Repeat("a", 63), true},
 		{strings.Repeat("a", 64), false},

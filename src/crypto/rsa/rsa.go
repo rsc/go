@@ -24,6 +24,16 @@ type PublicKey struct {
 	E int      // public exponent
 }
 
+// OAEPOptions is an interface for passing options to OAEP decryption using the
+// crypto.Decrypter interface.
+type OAEPOptions struct {
+	// Hash is the hash function that will be used when generating the mask.
+	Hash crypto.Hash
+	// Label is an arbitrary byte string that must be equal to the value
+	// used when encrypting.
+	Label []byte
+}
+
 var (
 	errPublicModulus       = errors.New("crypto/rsa: missing public modulus")
 	errPublicExponentSmall = errors.New("crypto/rsa: public exponent too small")
@@ -77,6 +87,37 @@ func (priv *PrivateKey) Sign(rand io.Reader, msg []byte, opts crypto.SignerOpts)
 	return SignPKCS1v15(rand, priv, opts.HashFunc(), msg)
 }
 
+// Decrypt decrypts ciphertext with priv. If opts is nil or of type
+// *PKCS1v15DecryptOptions then PKCS#1 v1.5 decryption is performed. Otherwise
+// opts must have type *OAEPOptions and OAEP decryption is done.
+func (priv *PrivateKey) Decrypt(rand io.Reader, ciphertext []byte, opts crypto.DecrypterOpts) (plaintext []byte, err error) {
+	if opts == nil {
+		return DecryptPKCS1v15(rand, priv, ciphertext)
+	}
+
+	switch opts := opts.(type) {
+	case *OAEPOptions:
+		return DecryptOAEP(opts.Hash.New(), rand, priv, ciphertext, opts.Label)
+
+	case *PKCS1v15DecryptOptions:
+		if l := opts.SessionKeyLen; l > 0 {
+			plaintext = make([]byte, l)
+			if _, err := io.ReadFull(rand, plaintext); err != nil {
+				return nil, err
+			}
+			if err := DecryptPKCS1v15SessionKey(rand, priv, ciphertext, plaintext); err != nil {
+				return nil, err
+			}
+			return plaintext, nil
+		} else {
+			return DecryptPKCS1v15(rand, priv, ciphertext)
+		}
+
+	default:
+		return nil, errors.New("crypto/rsa: invalid options for Decrypt")
+	}
+}
+
 type PrecomputedValues struct {
 	Dp, Dq *big.Int // D mod (P-1) (or mod Q-1)
 	Qinv   *big.Int // Q^-1 mod P
@@ -100,16 +141,6 @@ type CRTValue struct {
 func (priv *PrivateKey) Validate() error {
 	if err := checkPub(&priv.PublicKey); err != nil {
 		return err
-	}
-
-	// Check that the prime factors are actually prime. Note that this is
-	// just a sanity check. Since the random witnesses chosen by
-	// ProbablyPrime are deterministic, given the candidate number, it's
-	// easy for an attack to generate composites that pass this test.
-	for _, prime := range priv.Primes {
-		if !prime.ProbablyPrime(20) {
-			return errors.New("crypto/rsa: prime factor is composite")
-		}
 	}
 
 	// Check that Πprimes == n.

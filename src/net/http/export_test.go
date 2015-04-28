@@ -78,6 +78,14 @@ func (t *Transport) PutIdleTestConn() bool {
 	})
 }
 
+func SetInstallConnClosedHook(f func()) {
+	testHookPersistConnClosedGotRes = f
+}
+
+func SetEnterRoundTripHook(f func()) {
+	testHookEnterRoundTrip = f
+}
+
 func NewTestTimeoutHandler(handler Handler, ch <-chan time.Time) Handler {
 	f := func() <-chan time.Time {
 		return ch
@@ -106,3 +114,5 @@ func SetPendingDialHooks(before, after func()) {
 var ExportServerNewConn = (*Server).newConn
 
 var ExportCloseWriteAndWait = (*conn).closeWriteAndWait
+
+var ExportErrRequestCanceled = errRequestCanceled

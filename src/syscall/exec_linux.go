@@ -23,10 +23,12 @@ type SysProcAttr struct {
 	Credential  *Credential    // Credential.
 	Ptrace      bool           // Enable tracing.
 	Setsid      bool           // Create session.
-	Setpgid     bool           // Set process group ID to new pid (SYSV setpgrp)
+	Setpgid     bool           // Set process group ID to Pgid, or, if Pgid == 0, to new pid.
 	Setctty     bool           // Set controlling terminal to fd Ctty (only meaningful if Setsid is set)
 	Noctty      bool           // Detach fd 0 from controlling terminal
-	Ctty        int            // Controlling TTY fd (Linux only)
+	Ctty        int            // Controlling TTY fd
+	Foreground  bool           // Place child's process group in foreground. (Implies Setpgid. Uses Ctty as fd of controlling TTY)
+	Pgid        int            // Child's process group ID if Setpgid.
 	Pdeathsig   Signal         // Signal that the process will get when its parent dies (Linux only)
 	Cloneflags  uintptr        // Flags for clone calls (Linux only)
 	UidMappings []SysProcIDMap // User ID mappings for user namespaces.
@@ -57,6 +59,9 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 		i      int
 		p      [2]int
 	)
+
+	// Record parent PID so child can test if it has died.
+	ppid, _, _ := RawSyscall(SYS_GETPID, 0, 0, 0)
 
 	// Guard against side effects of shuffling fds below.
 	// Make sure that nextfd is beyond any currently open files so
@@ -138,7 +143,7 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 		// duplicate signal in rare cases, but it won't matter when
 		// using SIGKILL.
 		r1, _, _ = RawSyscall(SYS_GETPPID, 0, 0, 0)
-		if r1 == 1 {
+		if r1 != ppid {
 			pid, _, _ := RawSyscall(SYS_GETPID, 0, 0, 0)
 			_, _, err1 := RawSyscall(SYS_KILL, pid, uintptr(sys.Pdeathsig), 0)
 			if err1 != 0 {
@@ -164,8 +169,27 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 	}
 
 	// Set process group
-	if sys.Setpgid {
-		_, _, err1 = RawSyscall(SYS_SETPGID, 0, 0, 0)
+	if sys.Setpgid || sys.Foreground {
+		// Place child in process group.
+		_, _, err1 = RawSyscall(SYS_SETPGID, 0, uintptr(sys.Pgid), 0)
+		if err1 != 0 {
+			goto childerror
+		}
+	}
+
+	if sys.Foreground {
+		pgrp := sys.Pgid
+		if pgrp == 0 {
+			r1, _, err1 = RawSyscall(SYS_GETPID, 0, 0, 0)
+			if err1 != 0 {
+				goto childerror
+			}
+
+			pgrp = int(r1)
+		}
+
+		// Place process group in foreground.
+		_, _, err1 = RawSyscall(SYS_IOCTL, uintptr(sys.Ctty), uintptr(TIOCSPGRP), uintptr(unsafe.Pointer(&pgrp)))
 		if err1 != 0 {
 			goto childerror
 		}
@@ -211,7 +235,7 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 	// Pass 1: look for fd[i] < i and move those up above len(fd)
 	// so that pass 2 won't stomp on an fd it needs later.
 	if pipe < nextfd {
-		_, _, err1 = RawSyscall(SYS_DUP2, uintptr(pipe), uintptr(nextfd), 0)
+		_, _, err1 = RawSyscall(_SYS_dup, uintptr(pipe), uintptr(nextfd), 0)
 		if err1 != 0 {
 			goto childerror
 		}
@@ -221,7 +245,7 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 	}
 	for i = 0; i < len(fd); i++ {
 		if fd[i] >= 0 && fd[i] < int(i) {
-			_, _, err1 = RawSyscall(SYS_DUP2, uintptr(fd[i]), uintptr(nextfd), 0)
+			_, _, err1 = RawSyscall(_SYS_dup, uintptr(fd[i]), uintptr(nextfd), 0)
 			if err1 != 0 {
 				goto childerror
 			}
@@ -251,7 +275,7 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 		}
 		// The new fd is created NOT close-on-exec,
 		// which is exactly what we want.
-		_, _, err1 = RawSyscall(SYS_DUP2, uintptr(fd[i]), uintptr(i), 0)
+		_, _, err1 = RawSyscall(_SYS_dup, uintptr(fd[i]), uintptr(i), 0)
 		if err1 != 0 {
 			goto childerror
 		}
@@ -274,7 +298,7 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 	}
 
 	// Set the controlling TTY to Ctty
-	if sys.Setctty && sys.Ctty >= 0 {
+	if sys.Setctty {
 		_, _, err1 = RawSyscall(SYS_IOCTL, uintptr(sys.Ctty), uintptr(TIOCSCTTY), 0)
 		if err1 != 0 {
 			goto childerror

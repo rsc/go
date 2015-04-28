@@ -15,6 +15,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path"
@@ -55,9 +56,11 @@ type Handler interface {
 // A ResponseWriter interface is used by an HTTP handler to
 // construct an HTTP response.
 type ResponseWriter interface {
-	// Header returns the header map that will be sent by WriteHeader.
-	// Changing the header after a call to WriteHeader (or Write) has
-	// no effect.
+	// Header returns the header map that will be sent by
+	// WriteHeader. Changing the header after a call to
+	// WriteHeader (or Write) has no effect unless the modified
+	// headers were declared as trailers by setting the
+	// "Trailer" header before the call to WriteHeader.
 	Header() Header
 
 	// Write writes the data to the connection as part of an HTTP reply.
@@ -188,20 +191,14 @@ func (c *conn) noteClientGone() {
 	c.clientGone = true
 }
 
-// A switchReader can have its Reader changed at runtime.
-// It's not safe for concurrent Reads and switches.
-type switchReader struct {
-	io.Reader
-}
-
 // A switchWriter can have its Writer changed at runtime.
 // It's not safe for concurrent Writes and switches.
 type switchWriter struct {
 	io.Writer
 }
 
-// A liveSwitchReader is a switchReader that's safe for concurrent
-// reads and switches, if its mutex is held.
+// A liveSwitchReader can have its Reader changed at runtime. It's
+// safe for concurrent reads and switches, if its mutex is held.
 type liveSwitchReader struct {
 	sync.Mutex
 	r io.Reader
@@ -288,10 +285,21 @@ func (cw *chunkWriter) close() {
 		cw.writeHeader(nil)
 	}
 	if cw.chunking {
-		// zero EOF chunk, trailer key/value pairs (currently
-		// unsupported in Go's server), followed by a blank
-		// line.
-		cw.res.conn.buf.WriteString("0\r\n\r\n")
+		bw := cw.res.conn.buf // conn's bufio writer
+		// zero chunk to mark EOF
+		bw.WriteString("0\r\n")
+		if len(cw.res.trailers) > 0 {
+			trailers := make(Header)
+			for _, h := range cw.res.trailers {
+				if vv := cw.res.handlerHeader[h]; len(vv) > 0 {
+					trailers[h] = vv
+				}
+			}
+			trailers.Write(bw) // the writer handles noting errors
+		}
+		// final blank line after the trailers (whether
+		// present or not)
+		bw.WriteString("\r\n")
 	}
 }
 
@@ -332,11 +340,30 @@ type response struct {
 	// input from it.
 	requestBodyLimitHit bool
 
+	// trailers are the headers to be sent after the handler
+	// finishes writing the body.  This field is initialized from
+	// the Trailer response header when the response header is
+	// written.
+	trailers []string
+
 	handlerDone bool // set true when the handler exits
 
 	// Buffers for Date and Content-Length
 	dateBuf [len(TimeFormat)]byte
 	clenBuf [10]byte
+}
+
+// declareTrailer is called for each Trailer header when the
+// response header is written. It notes that a header will need to be
+// written in the trailers at the end of the response.
+func (w *response) declareTrailer(k string) {
+	k = CanonicalHeaderKey(k)
+	switch k {
+	case "Transfer-Encoding", "Content-Length", "Trailer":
+		// Forbidden by RFC 2616 14.40.
+		return
+	}
+	w.trailers = append(w.trailers, k)
 }
 
 // requestTooLarge is called by maxBytesReader when too much input has
@@ -747,6 +774,12 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	}
 	var setHeader extraHeader
 
+	trailers := false
+	for _, v := range cw.header["Trailer"] {
+		trailers = true
+		foreachHeaderElement(v, cw.res.declareTrailer)
+	}
+
 	// If the handler is done but never sent a Content-Length
 	// response header and this is our first (and last) write, set
 	// it, even to zero. This helps HTTP/1.0 clients keep their
@@ -759,7 +792,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	// write non-zero bytes.  If it's actually 0 bytes and the
 	// handler never looked at the Request.Method, we just don't
 	// send a Content-Length header.
-	if w.handlerDone && bodyAllowedForStatus(w.status) && header.get("Content-Length") == "" && (!isHEAD || len(p) > 0) {
+	if w.handlerDone && !trailers && bodyAllowedForStatus(w.status) && header.get("Content-Length") == "" && (!isHEAD || len(p) > 0) {
 		w.contentLength = int64(len(p))
 		setHeader.contentLength = strconv.AppendInt(cw.res.clenBuf[:0], int64(len(p)), 10)
 	}
@@ -885,6 +918,24 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	w.conn.buf.Write(crlf)
 }
 
+// foreachHeaderElement splits v according to the "#rule" construction
+// in RFC 2616 section 2.1 and calls fn for each non-empty element.
+func foreachHeaderElement(v string, fn func(string)) {
+	v = textproto.TrimString(v)
+	if v == "" {
+		return
+	}
+	if !strings.Contains(v, ",") {
+		fn(v)
+		return
+	}
+	for _, f := range strings.Split(v, ",") {
+		if f = textproto.TrimString(f); f != "" {
+			fn(f)
+		}
+	}
+}
+
 // statusLines is a cache of Status-Line strings, keyed by code (for
 // HTTP/1.1) or negative code (for HTTP/1.0). This is faster than a
 // map keyed by struct of two fields. This map's max size is bounded
@@ -930,7 +981,7 @@ func statusLine(req *Request, code int) string {
 	return line
 }
 
-// bodyAllowed returns true if a Write is allowed for this response type.
+// bodyAllowed reports whether a Write is allowed for this response type.
 // It's illegal to call this before the header has been flushed.
 func (w *response) bodyAllowed() bool {
 	if !w.wroteHeader {

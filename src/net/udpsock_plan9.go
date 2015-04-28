@@ -33,10 +33,10 @@ func (c *UDPConn) ReadFromUDP(b []byte) (n int, addr *UDPAddr, err error) {
 	buf := make([]byte, udpHeaderSize+len(b))
 	m, err := c.fd.data.Read(buf)
 	if err != nil {
-		return
+		return 0, nil, &OpError{Op: "read", Net: c.fd.net, Addr: c.fd.laddr, Err: err}
 	}
 	if m < udpHeaderSize {
-		return 0, nil, errors.New("short read reading UDP header")
+		return 0, nil, &OpError{Op: "read", Net: c.fd.net, Addr: c.fd.laddr, Err: errors.New("short read reading UDP header")}
 	}
 	buf = buf[:m]
 
@@ -59,7 +59,7 @@ func (c *UDPConn) ReadFrom(b []byte) (int, Addr, error) {
 // flags that were set on the packet and the source address of the
 // packet.
 func (c *UDPConn) ReadMsgUDP(b, oob []byte) (n, oobn, flags int, addr *UDPAddr, err error) {
-	return 0, 0, 0, nil, syscall.EPLAN9
+	return 0, 0, 0, nil, &OpError{Op: "read", Net: c.fd.net, Addr: c.fd.laddr, Err: syscall.EPLAN9}
 }
 
 // WriteToUDP writes a UDP packet to addr via c, copying the payload
@@ -86,7 +86,10 @@ func (c *UDPConn) WriteToUDP(b []byte, addr *UDPAddr) (int, error) {
 	buf := make([]byte, udpHeaderSize+len(b))
 	i := copy(buf, h.Bytes())
 	copy(buf[i:], b)
-	return c.fd.data.Write(buf)
+	if _, err := c.fd.data.Write(buf); err != nil {
+		return 0, &OpError{Op: "write", Net: c.fd.dir, Addr: addr, Err: err}
+	}
+	return len(b), nil
 }
 
 // WriteTo implements the PacketConn WriteTo method.
@@ -96,16 +99,18 @@ func (c *UDPConn) WriteTo(b []byte, addr Addr) (int, error) {
 	}
 	a, ok := addr.(*UDPAddr)
 	if !ok {
-		return 0, &OpError{"write", c.fd.dir, addr, syscall.EINVAL}
+		return 0, &OpError{Op: "write", Net: c.fd.dir, Addr: addr, Err: syscall.EINVAL}
 	}
 	return c.WriteToUDP(b, a)
 }
 
-// WriteMsgUDP writes a packet to addr via c, copying the payload from
-// b and the associated out-of-band data from oob.  It returns the
-// number of payload and out-of-band bytes written.
+// WriteMsgUDP writes a packet to addr via c if c isn't connected, or
+// to c's remote destination address if c is connected (in which case
+// addr must be nil).  The payload is copied from b and the associated
+// out-of-band data is copied from oob.  It returns the number of
+// payload and out-of-band bytes written.
 func (c *UDPConn) WriteMsgUDP(b, oob []byte, addr *UDPAddr) (n, oobn int, err error) {
-	return 0, 0, syscall.EPLAN9
+	return 0, 0, &OpError{Op: "write", Net: c.fd.dir, Addr: addr, Err: syscall.EPLAN9}
 }
 
 // DialUDP connects to the remote address raddr on the network net,
