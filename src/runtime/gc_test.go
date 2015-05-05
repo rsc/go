@@ -269,6 +269,19 @@ func BenchmarkSetTypeNode64Slice(b *testing.B) {
 	benchSetType(b, make([]Node64, 32))
 }
 
+type Node64Dead struct {
+	Left, Right *byte
+	Value       [64]uintptr
+}
+
+func BenchmarkSetTypeNode64Dead(b *testing.B) {
+	benchSetType(b, new(Node64Dead))
+}
+
+func BenchmarkSetTypeNode64DeadSlice(b *testing.B) {
+	benchSetType(b, make([]Node64Dead, 32))
+}
+
 type Node124 struct {
 	Value       [124]uintptr
 	Left, Right *byte
