@@ -40,7 +40,6 @@ func readgstatus(*g) uint32 // proc.c
 // run other goroutines.
 //
 // mcall can only be called from g stacks (not g0, not gsignal).
-//go:noescape
 func mcall(fn func(*g))
 
 // onM switches from the g to the g0 stack and invokes fn().

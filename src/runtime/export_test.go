@@ -163,3 +163,4 @@ func GostringW(w []uint16) (s string) {
 
 var Gostringnocopy = gostringnocopy
 var Maxstring = &maxstring
+var BenchSetType = benchSetType

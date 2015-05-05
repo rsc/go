@@ -344,6 +344,119 @@ marked:
 	return x
 }
 
+func benchSetType(n int, x interface{}) {
+	e := *(*eface)(unsafe.Pointer(&x))
+	t := e._type
+	var size uintptr
+	var p unsafe.Pointer
+	switch t.kind & kindMask {
+	case _KindPtr:
+		t = (*ptrtype)(unsafe.Pointer(t)).elem
+		size = t.size
+		p = e.data
+	case _KindSlice:
+		slice := *(*struct {
+			ptr      unsafe.Pointer
+			len, cap uintptr
+		})(e.data)
+		t = (*slicetype)(unsafe.Pointer(t)).elem
+		size = t.size * slice.len
+		p = slice.ptr
+	}
+	allocSize := goroundupsize(size)
+	for i := 0; i < n; i++ {
+		heapBitsSetType(p, allocSize, size, t)
+	}
+}
+
+func heapBitsSetType(x unsafe.Pointer, size, size0 uintptr, typ *_type) {
+	// From here till marked label marking the object as allocated
+	// and storing type info in the GC bitmap.
+	{
+		arena_start := uintptr(unsafe.Pointer(mheap_.arena_start))
+		off := (uintptr(x) - arena_start) / ptrSize
+		xbits := (*uint8)(unsafe.Pointer(arena_start - off/wordsPerBitmapByte - 1))
+		shift := (off % wordsPerBitmapByte) * gcBits
+		if debugMalloc && ((*xbits>>shift)&(bitMask|bitPtrMask)) != bitBoundary {
+			println("runtime: bits =", (*xbits>>shift)&(bitMask|bitPtrMask))
+			gothrow("bad bits in markallocated")
+		}
+
+		var ti, te uintptr
+		var ptrmask *uint8
+		if size == ptrSize {
+			// It's one word and it has pointers, it must be a pointer.
+			*xbits |= (bitsPointer << 2) << shift
+			goto marked
+		}
+		if typ.kind&kindGCProg != 0 {
+			nptr := (uintptr(typ.size) + ptrSize - 1) / ptrSize
+			masksize := nptr
+			if masksize%2 != 0 {
+				masksize *= 2 // repeated
+			}
+			masksize = masksize * pointersPerByte / 8 // 4 bits per word
+			masksize++                                // unroll flag in the beginning
+			if masksize > maxGCMask && typ.gc[1] != 0 {
+				// If the mask is too large, unroll the program directly
+				// into the GC bitmap. It's 7 times slower than copying
+				// from the pre-unrolled mask, but saves 1/16 of type size
+				// memory for the mask.
+				mp := acquirem()
+				mp.ptrarg[0] = x
+				mp.ptrarg[1] = unsafe.Pointer(typ)
+				mp.scalararg[0] = uintptr(size)
+				mp.scalararg[1] = uintptr(size0)
+				onM(unrollgcproginplace_m)
+				releasem(mp)
+				goto marked
+			}
+			ptrmask = (*uint8)(unsafe.Pointer(uintptr(typ.gc[0])))
+			// Check whether the program is already unrolled.
+			if uintptr(atomicloadp(unsafe.Pointer(ptrmask)))&0xff == 0 {
+				mp := acquirem()
+				mp.ptrarg[0] = unsafe.Pointer(typ)
+				onM(unrollgcprog_m)
+				releasem(mp)
+			}
+			ptrmask = (*uint8)(add(unsafe.Pointer(ptrmask), 1)) // skip the unroll flag byte
+		} else {
+			ptrmask = (*uint8)(unsafe.Pointer(typ.gc[0])) // pointer to unrolled mask
+		}
+		if size == 2*ptrSize {
+			*xbits = *ptrmask | bitBoundary
+			goto marked
+		}
+		te = uintptr(typ.size) / ptrSize
+		// If the type occupies odd number of words, its mask is repeated.
+		if te%2 == 0 {
+			te /= 2
+		}
+		// Copy pointer bitmask into the bitmap.
+		for i := uintptr(0); i < size0; i += 2 * ptrSize {
+			v := *(*uint8)(add(unsafe.Pointer(ptrmask), ti))
+			ti++
+			if ti == te {
+				ti = 0
+			}
+			if i == 0 {
+				v |= bitBoundary
+			}
+			if i+ptrSize == size0 {
+				v &^= uint8(bitPtrMask << 4)
+			}
+
+			*xbits = v
+			xbits = (*byte)(add(unsafe.Pointer(xbits), ^uintptr(0)))
+		}
+		if size0%(2*ptrSize) == 0 && size0 < size {
+			// Mark the word after last object's word as bitsDead.
+			*xbits = bitsDead << 2
+		}
+	}
+marked:
+}
+
 // implementation of new builtin
 func newobject(typ *_type) unsafe.Pointer {
 	flags := uint32(0)
