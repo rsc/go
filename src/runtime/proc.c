@@ -1443,11 +1443,7 @@ stop:
 		return gp;
 	}
 	p = releasep();
-
-	runtime·usleep(100*1000);
-
 	pidleput(p);
-
 	runtime·unlock(&runtime·sched.lock);
 	if(g->m->spinning) {
 		g->m->spinning = false;
@@ -1529,8 +1525,6 @@ injectglist(G *glist)
 		globrunqput(gp);
 	}
 	runtime·unlock(&runtime·sched.lock);
-
-	runtime·usleep(100*1000);
 
 	for(; n && runtime·sched.npidle; n--)
 		startm(nil, false);
