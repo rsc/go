@@ -2021,7 +2021,7 @@ func (p *Package) load(ld *modload.Loader, ctx context.Context, opts PackageOpts
 	p.DefaultGODEBUG = defaultGODEBUG(ld, p, nil, nil, nil)
 
 	if !opts.SuppressEmbedFiles {
-		p.EmbedFiles, p.Internal.Embed, err = resolveEmbed(p.Dir, p.EmbedPatterns)
+		p.EmbedFiles, p.Internal.Embed, err = resolveEmbed(fsys.DirFS(p.Dir), p.EmbedPatterns)
 		if err != nil {
 			p.Incomplete = true
 			setError(err)
@@ -2151,7 +2151,7 @@ func (e *EmbedError) Unwrap() error {
 // TODO(#42504): Once go mod vendor uses load.PackagesAndErrors, just
 // call (*Package).ResolveEmbed
 func ResolveEmbed(dir string, patterns []string) ([]string, error) {
-	files, _, err := resolveEmbed(dir, patterns)
+	files, _, err := resolveEmbed(fsys.DirFS(dir), patterns)
 	return files, err
 }
 
@@ -2161,7 +2161,9 @@ var embedfollowsymlinks = godebug.New("embedfollowsymlinks")
 // It sets files to the list of unique files matched (for go list),
 // and it sets pmap to the more precise mapping from
 // patterns to files.
-func resolveEmbed(pkgdir string, patterns []string) (files []string, pmap map[string][]string, err error) {
+func resolveEmbed(fsys fs.FS, patterns []string) (files []string, pmap map[string][]string, err error) {
+	type filepath struct{} // block filepath package in this function
+
 	var pattern string
 	defer func() {
 		if err != nil {
@@ -2187,22 +2189,19 @@ func resolveEmbed(pkgdir string, patterns []string) (files []string, pmap map[st
 		}
 
 		// Glob to find matches.
-		match, err := fsys.Glob(str.QuoteGlob(str.WithFilePathSeparator(pkgdir)) + filepath.FromSlash(glob))
+		match, err := fs.Glob(fsys, glob)
 		if err != nil {
 			return nil, nil, err
 		}
 
 		// Filter list of matches down to the ones that will still exist when
-		// the directory is packaged up as a module. (If p.Dir is in the module cache,
-		// only those files exist already, but if p.Dir is in the current module,
+		// the directory is packaged up as a module. (If we are in the module cache,
+		// only those files exist already, but if we are in the current module,
 		// then there may be other things lying around, like symbolic links or .git directories.)
 		var list []string
 		for _, file := range match {
-			// relative path to p.Dir which begins without prefix slash
-			rel := filepath.ToSlash(str.TrimFilePathPrefix(file, pkgdir))
-
 			what := "file"
-			info, err := fsys.Lstat(file)
+			info, err := fs.Lstat(fsys, file)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -2212,33 +2211,33 @@ func resolveEmbed(pkgdir string, patterns []string) (files []string, pmap map[st
 
 			// Check that directories along path do not begin a new module
 			// (do not contain a go.mod).
-			for dir := file; len(dir) > len(pkgdir)+1 && !dirOK[dir]; dir = filepath.Dir(dir) {
-				if _, err := fsys.Stat(filepath.Join(dir, "go.mod")); err == nil {
-					return nil, nil, fmt.Errorf("cannot embed %s %s: in different module", what, rel)
+			for dir := file; dir != "." && !dirOK[dir]; dir = pathpkg.Dir(dir) {
+				if _, err := fs.Stat(fsys, pathpkg.Join(dir, "go.mod")); err == nil {
+					return nil, nil, fmt.Errorf("cannot embed %s %s: in different module", what, file)
 				}
 				if dir != file {
-					if info, err := fsys.Lstat(dir); err == nil && !info.IsDir() {
-						return nil, nil, fmt.Errorf("cannot embed %s %s: in non-directory %s", what, rel, dir[len(pkgdir)+1:])
+					if info, err := fs.Lstat(fsys, dir); err == nil && !info.IsDir() {
+						return nil, nil, fmt.Errorf("cannot embed %s %s: in non-directory %s", what, file, dir)
 					}
 				}
 				dirOK[dir] = true
-				if elem := filepath.Base(dir); isBadEmbedName(elem) {
+				if elem := pathpkg.Base(dir); isBadEmbedName(elem) {
 					if dir == file {
-						return nil, nil, fmt.Errorf("cannot embed %s %s: invalid name %s", what, rel, elem)
+						return nil, nil, fmt.Errorf("cannot embed %s %s: invalid name %s", what, file, elem)
 					} else {
-						return nil, nil, fmt.Errorf("cannot embed %s %s: in invalid directory %s", what, rel, elem)
+						return nil, nil, fmt.Errorf("cannot embed %s %s: in invalid directory %s", what, file, elem)
 					}
 				}
 			}
 
 			switch {
 			default:
-				return nil, nil, fmt.Errorf("cannot embed irregular file %s", rel)
+				return nil, nil, fmt.Errorf("cannot embed irregular file %s", file)
 
 			case info.Mode().IsRegular():
-				if have[rel] != pid {
-					have[rel] = pid
-					list = append(list, rel)
+				if have[file] != pid {
+					have[file] = pid
+					list = append(list, file)
 				}
 
 			// If the embedfollowsymlinks GODEBUG is set to 1, allow the leaf file to be a
@@ -2246,28 +2245,27 @@ func resolveEmbed(pkgdir string, patterns []string) (files []string, pmap map[st
 			// checked that none of the parent directories of the file are symlinks in the
 			// loop above. The file pointed to by the symlink must be a regular file.
 			case embedfollowsymlinks.Value() == "1" && info.Mode()&fs.ModeType == fs.ModeSymlink:
-				info, err := fsys.Stat(file)
+				info, err := fs.Stat(fsys, file)
 				if err != nil {
 					return nil, nil, err
 				}
 				if !info.Mode().IsRegular() {
-					return nil, nil, fmt.Errorf("cannot embed irregular file %s", rel)
+					return nil, nil, fmt.Errorf("cannot embed irregular file %s", file)
 				}
-				if have[rel] != pid {
+				if have[file] != pid {
 					embedfollowsymlinks.IncNonDefault()
-					have[rel] = pid
-					list = append(list, rel)
+					have[file] = pid
+					list = append(list, file)
 				}
 
 			case info.IsDir():
 				// Gather all files in the named directory, stopping at module boundaries
 				// and ignoring files that wouldn't be packaged into a module.
 				count := 0
-				err := fsys.WalkDir(file, func(path string, d fs.DirEntry, err error) error {
+				err := fs.WalkDir(fsys, file, func(path string, d fs.DirEntry, err error) error {
 					if err != nil {
 						return err
 					}
-					rel := filepath.ToSlash(str.TrimFilePathPrefix(path, pkgdir))
 					name := d.Name()
 					if path != file && (isBadEmbedName(name) || ((name[0] == '.' || name[0] == '_') && !all)) {
 						// Avoid hidden files that user may not know about.
@@ -2282,13 +2280,13 @@ func resolveEmbed(pkgdir string, patterns []string) (files []string, pmap map[st
 						// Error on bad embed names.
 						// See golang.org/issue/54003.
 						if isBadEmbedName(name) {
-							return fmt.Errorf("cannot embed file %s: invalid name %s", rel, name)
+							return fmt.Errorf("cannot embed file %s: invalid name %s", path, name)
 						}
 						return nil
 					}
 					if d.IsDir() {
-						if _, err := fsys.Stat(filepath.Join(path, "go.mod")); err == nil {
-							return filepath.SkipDir
+						if _, err := fs.Stat(fsys, pathpkg.Join(path, "go.mod")); err == nil {
+							return fs.SkipDir
 						}
 						return nil
 					}
@@ -2296,9 +2294,9 @@ func resolveEmbed(pkgdir string, patterns []string) (files []string, pmap map[st
 						return nil
 					}
 					count++
-					if have[rel] != pid {
-						have[rel] = pid
-						list = append(list, rel)
+					if have[path] != pid {
+						have[path] = pid
+						list = append(list, path)
 					}
 					return nil
 				})
@@ -2306,7 +2304,7 @@ func resolveEmbed(pkgdir string, patterns []string) (files []string, pmap map[st
 					return nil, nil, err
 				}
 				if count == 0 {
-					return nil, nil, fmt.Errorf("cannot embed directory %s: contains no embeddable files", rel)
+					return nil, nil, fmt.Errorf("cannot embed directory %s: contains no embeddable files", file)
 				}
 			}
 		}

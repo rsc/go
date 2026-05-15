@@ -480,7 +480,7 @@ func TestGlob(t *testing.T) {
 
 	for _, tc := range testCases {
 		pattern := tc.pattern
-		match, err := Glob(pattern)
+		match, err := fs.Glob(DirFS("."), pattern)
 		if err != nil {
 			t.Errorf("Glob(%q): %v", pattern, err)
 			continue

@@ -144,7 +144,7 @@ func TestPackagesAndErrors(ld *modload.Loader, ctx context.Context, done func(),
 		ptestCompiledImports = append(ptestCompiledImports, p1.ImportPath)
 	}
 	var err error
-	p.TestEmbedFiles, testEmbed, err = resolveEmbed(p.Dir, p.TestEmbedPatterns)
+	p.TestEmbedFiles, testEmbed, err = resolveEmbed(fsys.DirFS(p.Dir), p.TestEmbedPatterns)
 	if err != nil {
 		ptestErr = &PackageError{
 			ImportStack: stk.Copy(),
@@ -189,7 +189,7 @@ func TestPackagesAndErrors(ld *modload.Loader, ctx context.Context, done func(),
 		ximports = append(ximports, p1)
 		pxtestCompiledImports = append(pxtestCompiledImports, p1.ImportPath)
 	}
-	p.XTestEmbedFiles, xtestEmbed, err = resolveEmbed(p.Dir, p.XTestEmbedPatterns)
+	p.XTestEmbedFiles, xtestEmbed, err = resolveEmbed(fsys.DirFS(p.Dir), p.XTestEmbedPatterns)
 	if err != nil && pxtestErr == nil {
 		pxtestErr = &PackageError{
 			ImportStack: stk.Copy(),

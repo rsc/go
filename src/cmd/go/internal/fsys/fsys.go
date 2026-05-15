@@ -732,3 +732,123 @@ func cmp(x, y string) int {
 	}
 	return len(x) - len(y)
 }
+
+// DirFS rerturns a file system (an fs.FS) for the tree of files rooted at dir in the overlay.
+func DirFS(dir string) fs.FS {
+	return dirFS(dir)
+}
+
+var (
+	_ fs.StatFS     = dirFS("")
+	_ fs.ReadDirFS  = dirFS("")
+	_ fs.ReadFileFS = dirFS("")
+	_ fs.ReadLinkFS = dirFS("")
+)
+
+// Note: The dirFS implementation is copied from ../../../../os/file.go
+
+type dirFS string
+
+func (dir dirFS) Open(name string) (fs.File, error) {
+	fullname, err := dir.join(name)
+	if err != nil {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
+	}
+	f, err := Open(fullname)
+	if err != nil {
+		// DirFS takes a string appropriate for GOOS,
+		// while the name argument here is always slash separated.
+		// dir.join will have mixed the two; undo that for
+		// error reporting.
+		err.(*fs.PathError).Path = name
+		return nil, err
+	}
+	return f, nil
+}
+
+// The ReadFile method calls the [ReadFile] function for the file
+// with the given name in the directory. The function provides
+// robust handling for small files and special file systems.
+// Through this method, dirFS implements [io/fs.ReadFileFS].
+func (dir dirFS) ReadFile(name string) ([]byte, error) {
+	fullname, err := dir.join(name)
+	if err != nil {
+		return nil, &fs.PathError{Op: "readfile", Path: name, Err: err}
+	}
+	b, err := ReadFile(fullname)
+	if err != nil {
+		if e, ok := err.(*fs.PathError); ok {
+			// See comment in dirFS.Open.
+			e.Path = name
+		}
+		return nil, err
+	}
+	return b, nil
+}
+
+// ReadDir reads the named directory, returning all its directory entries sorted
+// by filename. Through this method, dirFS implements [io/fs.ReadDirFS].
+func (dir dirFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	fullname, err := dir.join(name)
+	if err != nil {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: err}
+	}
+	entries, err := ReadDir(fullname)
+	if err != nil {
+		if e, ok := err.(*fs.PathError); ok {
+			// See comment in dirFS.Open.
+			e.Path = name
+		}
+		return nil, err
+	}
+	return entries, nil
+}
+
+func (dir dirFS) Stat(name string) (fs.FileInfo, error) {
+	fullname, err := dir.join(name)
+	if err != nil {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: err}
+	}
+	f, err := Stat(fullname)
+	if err != nil {
+		// See comment in dirFS.Open.
+		err.(*fs.PathError).Path = name
+		return nil, err
+	}
+	return f, nil
+}
+
+func (dir dirFS) Lstat(name string) (fs.FileInfo, error) {
+	fullname, err := dir.join(name)
+	if err != nil {
+		return nil, &fs.PathError{Op: "lstat", Path: name, Err: err}
+	}
+	f, err := Lstat(fullname)
+	if err != nil {
+		// See comment in dirFS.Open.
+		err.(*fs.PathError).Path = name
+		return nil, err
+	}
+	return f, nil
+}
+
+// ReadLink is not supported, but we want to provide Lstat,
+// so we have to implement both for ReadLinkFS.
+func (dir dirFS) ReadLink(name string) (string, error) {
+	return "", fmt.Errorf("readlink not supported")
+}
+
+// join returns the path for name in dir.
+func (dir dirFS) join(name string) (string, error) {
+	if dir == "" {
+		return "", errors.New("os: DirFS with empty root")
+	}
+	name, err := filepath.Localize(name)
+	if err != nil {
+		return "", fs.ErrInvalid
+	}
+	if os.IsPathSeparator(dir[len(dir)-1]) {
+		return string(dir) + name, nil
+	}
+	return string(dir) + string(os.PathSeparator) + name, nil
+}
