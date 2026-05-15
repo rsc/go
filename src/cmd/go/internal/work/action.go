@@ -389,7 +389,7 @@ func CheckGOOSARCHPair(goos, goarch string) error {
 // be called during action graph execution.
 func (b *Builder) NewObjdir() string {
 	b.objdirSeq++
-	return str.WithFilePathSeparator(filepath.Join(b.WorkDir, fmt.Sprintf("b%03d", b.objdirSeq)))
+	return filepath.Join(b.WorkDir, fmt.Sprintf("b%03d", b.objdirSeq)) + string(filepath.Separator)
 }
 
 // readpkglist returns the list of packages that were built into the shared library

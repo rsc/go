@@ -785,7 +785,7 @@ contents of other file
 			initOverlay(t, tc.overlay)
 
 			var got []file
-			WalkDir(tc.root, func(path string, d fs.DirEntry, err error) error {
+			fs.WalkDir(DirFS("."), tc.root, func(path string, d fs.DirEntry, err error) error {
 				info, err := d.Info()
 				if err != nil {
 					t.Fatal(err)
@@ -838,7 +838,7 @@ func TestWalkSkipDir(t *testing.T) {
 `)
 
 	var seen []string
-	WalkDir("dir", func(path string, d fs.DirEntry, err error) error {
+	fs.WalkDir(DirFS("."), "dir", func(path string, d fs.DirEntry, err error) error {
 		seen = append(seen, filepath.ToSlash(path))
 		if d.Name() == "skip" {
 			return filepath.SkipDir
@@ -874,7 +874,7 @@ func TestWalkSkipAll(t *testing.T) {
 `)
 
 	var seen []string
-	WalkDir("dir", func(path string, d fs.DirEntry, err error) error {
+	fs.WalkDir(DirFS("."), "dir", func(path string, d fs.DirEntry, err error) error {
 		seen = append(seen, filepath.ToSlash(path))
 		if d.Name() == "foo2" {
 			return filepath.SkipAll
@@ -899,7 +899,7 @@ func TestWalkError(t *testing.T) {
 	initOverlay(t, "{}")
 
 	alreadyCalled := false
-	err := WalkDir("foo", func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(DirFS("."), "foo", func(path string, d fs.DirEntry, err error) error {
 		if alreadyCalled {
 			t.Fatal("expected walk function to be called exactly once, but it was called more than once")
 		}
@@ -922,12 +922,14 @@ func TestWalkSymlink(t *testing.T) {
 	testenv.MustHaveSymlink(t)
 
 	initOverlay(t, `{
-	"Replace": {"overlay_symlink/file": "symlink/file"}
+	"Replace": {"overlay_symlink/file": "dir/symlink/extra"}
 }
--- dir/file --`)
+-- dir/file --
+-- other/extra --
+`)
 
 	// Create symlink
-	if err := os.Symlink("dir", "symlink"); err != nil {
+	if err := os.Symlink("../other", "dir/symlink"); err != nil {
 		t.Error(err)
 	}
 
@@ -936,22 +938,15 @@ func TestWalkSymlink(t *testing.T) {
 		dir       string
 		wantFiles []string
 	}{
-		{"control", "dir", []string{"dir", filepath.Join("dir", "file")}},
-		// ensure Walk doesn't walk into the directory pointed to by the symlink
-		// (because it's supposed to use Lstat instead of Stat).
-		{"symlink_to_dir", "symlink", []string{"symlink"}},
-		{"overlay_to_symlink_to_dir", "overlay_symlink", []string{"overlay_symlink", filepath.Join("overlay_symlink", "file")}},
-
-		// However, adding filepath.Separator should cause the link to be resolved.
-		{"symlink_with_slash", "symlink" + string(filepath.Separator), []string{"symlink" + string(filepath.Separator), filepath.Join("symlink", "file")}},
-		{"overlay_to_symlink_to_dir", "overlay_symlink" + string(filepath.Separator), []string{"overlay_symlink" + string(filepath.Separator), filepath.Join("overlay_symlink", "file")}},
+		{"control", "dir", []string{"dir", "dir/file", "dir/symlink"}}, // but not dir/symlink/extrxa.
+		{"overlay_to_symlink_to_dir", "overlay_symlink", []string{"overlay_symlink", "overlay_symlink/file"}},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			var got []string
 
-			err := WalkDir(tc.dir, func(path string, d fs.DirEntry, err error) error {
+			err := fs.WalkDir(DirFS("."), tc.dir, func(path string, d fs.DirEntry, err error) error {
 				t.Logf("walk %q", path)
 				got = append(got, path)
 				if err != nil {

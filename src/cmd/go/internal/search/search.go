@@ -128,31 +128,27 @@ func (m *Match) MatchPackages() {
 			continue
 		}
 
-		// If the root itself is a symlink to a directory,
-		// we want to follow it (see https://go.dev/issue/50807).
-		// Add a trailing separator to force that to happen.
-		src = str.WithFilePathSeparator(filepath.Clean(src))
-		root := src
+		srcFS := fsys.DirFS(src)
+		top := "."
 		if m.pattern == "cmd" {
-			root += "cmd" + string(filepath.Separator)
+			top = "cmd"
 		}
-
-		err := fsys.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		err := fs.WalkDir(srcFS, top, func(rel string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err // Likely a permission error, which could interfere with matching.
 			}
-			if path == src {
+			if rel == "." {
 				return nil // GOROOT/src and GOPATH/src cannot contain packages.
 			}
 
 			want := true
 			// Avoid .foo, _foo, and testdata directory trees.
-			_, elem := filepath.Split(path)
+			_, elem := path.Split(rel)
 			if strings.HasPrefix(elem, ".") || strings.HasPrefix(elem, "_") || elem == "testdata" {
 				want = false
 			}
 
-			name := filepath.ToSlash(path[len(src):])
+			name := rel
 			if m.pattern == "std" && (!IsStandardImportPath(name) || name == "cmd") {
 				// The name "std" is only the standard library.
 				// If the name is cmd, it's the root of the command tree.
@@ -164,8 +160,8 @@ func (m *Match) MatchPackages() {
 
 			if !d.IsDir() {
 				if d.Type()&fs.ModeSymlink != 0 && want && strings.Contains(m.pattern, "...") {
-					if target, err := fsys.Stat(path); err == nil && target.IsDir() {
-						fmt.Fprintf(os.Stderr, "warning: ignoring symlink %s\n", path)
+					if target, err := fs.Stat(srcFS, rel); err == nil && target.IsDir() {
+						fmt.Fprintf(os.Stderr, "warning: ignoring symlink %s\n", filepath.Join(src, rel))
 					}
 				}
 				return nil
@@ -181,7 +177,7 @@ func (m *Match) MatchPackages() {
 			if !match(name) {
 				return nil
 			}
-			pkg, err := cfg.BuildContext.ImportDir(path, 0)
+			pkg, err := cfg.BuildContext.ImportDir(filepath.Join(src, rel), 0)
 			if err != nil {
 				if _, noGo := err.(*build.NoGoError); noGo {
 					// The package does not actually exist, so record neither the package
@@ -342,11 +338,7 @@ func (m *Match) MatchDirs(modRoots []string) {
 	}
 
 	ignorePatterns := parseIgnorePatterns(modRoot)
-	// If dir is actually a symlink to a directory,
-	// we want to follow it (see https://go.dev/issue/50807).
-	// Add a trailing separator to force that to happen.
-	dir = str.WithFilePathSeparator(dir)
-	err := fsys.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(fsys.DirFS(dir), ".", func(rel string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err // Likely a permission error, which could interfere with matching.
 		}
@@ -354,7 +346,7 @@ func (m *Match) MatchDirs(modRoots []string) {
 			return nil
 		}
 		top := false
-		if path == dir {
+		if rel == "." {
 			// Walk starts at dir and recurses. For the recursive case,
 			// the path is the result of filepath.Join, which calls filepath.Clean.
 			// The initial case is not Cleaned, though, so we do this explicitly.
@@ -364,15 +356,15 @@ func (m *Match) MatchDirs(modRoots []string) {
 			// package, because prepending the prefix "./" to the unclean path would
 			// result in "././io", and match("././io") returns false.
 			top = true
-			path = filepath.Clean(path)
 		}
 
 		// Avoid .foo, _foo, and testdata directory trees, but do not avoid "." or "..".
-		_, elem := filepath.Split(path)
+		_, elem := filepath.Split(rel)
 		dot := strings.HasPrefix(elem, ".") && elem != "." && elem != ".."
 		if dot || strings.HasPrefix(elem, "_") || elem == "testdata" {
 			return filepath.SkipDir
 		}
+		path := filepath.ToSlash(filepath.Join(dir, rel))
 		absPath, err := filepath.Abs(path)
 		if err != nil {
 			return err
@@ -392,7 +384,7 @@ func (m *Match) MatchDirs(modRoots []string) {
 			}
 		}
 
-		name := prefix + filepath.ToSlash(path)
+		name := prefix + path
 		if !match(name) {
 			return nil
 		}

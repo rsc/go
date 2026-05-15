@@ -150,14 +150,11 @@ func workUse(ctx context.Context, s *modload.Loader, gowork string, wf *modfile.
 		}
 
 		// Add or remove entries for any subdirectories that still exist.
-		// If the root itself is a symlink to a directory,
-		// we want to follow it (see https://go.dev/issue/50807).
-		// Add a trailing separator to force that to happen.
-		fsys.WalkDir(str.WithFilePathSeparator(useDir), func(path string, d fs.DirEntry, err error) error {
+		fs.WalkDir(fsys.DirFS(useDir), ".", func(rel string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-
+			path := filepath.Join(useDir, rel)
 			if !d.IsDir() {
 				if d.Type()&fs.ModeSymlink != 0 {
 					if target, err := fsys.Stat(path); err == nil && target.IsDir() {

@@ -7,7 +7,6 @@ package modindex
 import (
 	"cmd/go/internal/base"
 	"cmd/go/internal/fsys"
-	"cmd/go/internal/str"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +15,7 @@ import (
 	"go/scanner"
 	"go/token"
 	"io/fs"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -23,18 +23,18 @@ import (
 // moduleWalkErr returns filepath.SkipDir if the directory isn't relevant
 // when indexing a module or generating a filehash, ErrNotIndexed,
 // if the module shouldn't be indexed, and nil otherwise.
-func moduleWalkErr(root string, path string, d fs.DirEntry, err error) error {
+func moduleWalkErr(root fs.FS, rel string, d fs.DirEntry, err error) error {
 	if err != nil {
 		return ErrNotIndexed
 	}
 	// stop at module boundaries
-	if d.IsDir() && path != root {
-		if info, err := fsys.Stat(filepath.Join(path, "go.mod")); err == nil && !info.IsDir() {
-			return filepath.SkipDir
+	if d.IsDir() && rel != "." {
+		if info, err := fs.Stat(root, path.Join(rel, "go.mod")); err == nil && !info.IsDir() {
+			return fs.SkipDir
 		}
 	}
 	if d.Type()&fs.ModeSymlink != 0 {
-		if target, err := fsys.Stat(path); err == nil && target.IsDir() {
+		if target, err := fs.Stat(root, rel); err == nil && target.IsDir() {
 			// return an error to make the module hash invalid.
 			// Symlink directories in modules are tricky, so we won't index
 			// modules that contain them.
@@ -53,22 +53,18 @@ func indexModule(modroot string) ([]byte, error) {
 	fsys.Trace("indexModule", modroot)
 	var packages []*rawPackage
 
-	// If the root itself is a symlink to a directory,
-	// we want to follow it (see https://go.dev/issue/50807).
-	// Add a trailing separator to force that to happen.
-	root := str.WithFilePathSeparator(modroot)
-	err := fsys.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err := moduleWalkErr(root, path, d, err); err != nil {
+	root := fsys.DirFS(modroot)
+	err := fs.WalkDir(root, ".", func(rel string, d fs.DirEntry, err error) error {
+		if err := moduleWalkErr(root, rel, d, err); err != nil {
 			return err
 		}
 
 		if !d.IsDir() {
 			return nil
 		}
-		if !strings.HasPrefix(path, root) {
-			panic(fmt.Errorf("path %v in walk doesn't have modroot %v as prefix", path, modroot))
+		if rel == "." {
+			rel = ""
 		}
-		rel := path[len(root):]
 		packages = append(packages, importRaw(modroot, rel))
 		return nil
 	})
