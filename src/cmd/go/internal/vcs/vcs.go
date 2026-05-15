@@ -6,6 +6,7 @@ package vcs
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"internal/godebug"
@@ -42,15 +43,19 @@ type Cmd struct {
 
 	Scheme  []string
 	PingCmd string
+	ReadCmd string
 
-	Status func(v *Cmd, rootDir string) (Status, error)
+	Status   func(v *Cmd, rootDir string) (Status, error)
+	ReadOrig func(ctx context.Context, file string, maxSize int64) ([]byte, error)
 }
 
 // Status is the current state of a local repository.
 type Status struct {
-	Revision    string    // Optional.
-	CommitTime  time.Time // Optional.
-	Uncommitted bool      // Required.
+	Revision   string    // checked out version
+	CommitTime time.Time // time of revision
+	Added      []string  // list of files added but uncommitted
+	Modified   []string  // list of files modified but uncommitted
+	Removed    []string  // list of files removed but uncommitted
 }
 
 var (
@@ -153,6 +158,7 @@ var vcsHg = &Cmd{
 
 	Scheme:  []string{"https", "http", "ssh"},
 	PingCmd: "identify -- {scheme}://{repo}",
+	ReadCmd: "cat --rev=tip -- {file}",
 	Status:  hgStatus,
 }
 
@@ -181,12 +187,12 @@ func hgStatus(vcsHg *Cmd, rootDir string) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	uncommitted := len(out) > 0
+	uncommitted := statusFiles(out)
 
 	return Status{
-		Revision:    rev,
-		CommitTime:  commitTime,
-		Uncommitted: uncommitted,
+		Revision:   rev,
+		CommitTime: commitTime,
+		Modified:   uncommitted,
 	}, nil
 }
 
@@ -223,16 +229,17 @@ var vcsGit = &Cmd{
 	// without it because the {scheme} value comes from the predefined list above.
 	// See golang.org/issue/33836.
 	PingCmd: "ls-remote {scheme}://{repo}",
+	ReadCmd: "show HEAD:{file}",
 
 	Status: gitStatus,
 }
 
 func gitStatus(vcsGit *Cmd, rootDir string) (Status, error) {
-	out, err := vcsGit.runOutputVerboseOnly(rootDir, "status --porcelain")
+	out, err := vcsGit.runOutputVerboseOnly(rootDir, "status --porcelain --untracked-files=all --no-renames")
 	if err != nil {
 		return Status{}, err
 	}
-	uncommitted := len(out) > 0
+	st := gitStatusFiles(out)
 
 	// "git status" works for empty repositories, but "git log" does not.
 	// Assume there are no commits in the repo when "git log" fails with
@@ -240,7 +247,7 @@ func gitStatus(vcsGit *Cmd, rootDir string) (Status, error) {
 	var rev string
 	var commitTime time.Time
 	out, err = vcsGit.runOutputVerboseOnly(rootDir, "-c log.showsignature=false log -1 --format=%H:%ct")
-	if err != nil && !uncommitted {
+	if err != nil && len(st.Added)+len(st.Modified)+len(st.Removed) == 0 {
 		return Status{}, err
 	} else if err == nil {
 		rev, commitTime, err = parseRevTime(out)
@@ -248,12 +255,83 @@ func gitStatus(vcsGit *Cmd, rootDir string) (Status, error) {
 			return Status{}, err
 		}
 	}
+	st.Revision = rev
+	st.CommitTime = commitTime
+	return st, nil
+}
 
-	return Status{
-		Revision:    rev,
-		CommitTime:  commitTime,
-		Uncommitted: uncommitted,
-	}, nil
+// gitStatusFiles returns the names of files added, modified, and removed
+// in the output of "git status --porcelain --untracked-files=all --no-renames".
+func gitStatusFiles(out []byte) Status {
+	// Each line is "xy filename" where x and y are status characters (bytes).
+	var st Status
+	for line := range strings.Lines(string(out)) {
+		if len(line) <= 3 || line[2] != ' ' {
+			continue
+		}
+		file := strings.TrimSpace(line[3:])
+		if file == "" {
+			continue
+		}
+		// line[0] is status of index relative to HEAD
+		// line[1] is status of file system relative to index
+		//
+		//	A - added
+		//	D - deleted
+		//	M - modified
+		//	T - file type change only
+		//	U - unmerged (during merge)
+		//	C - copied
+		//	R - renamed
+		//
+		// Special pairs:
+		//	?? - untracked
+		//	!! - ignored
+		//
+		// We run with --no-renames so don't need to worry about C and R.
+		// We treat type changes and unmerged as modified.
+		// We also don't show ignores, which may or may not be correct.
+		switch {
+		case line[0:2] == "AD":
+			// Added to index but then deleted, so ignore.
+			continue
+		case line[0] == 'A', line[1] == 'A', line[0] == '?':
+			// Added, either to index or working dir.
+			st.Added = append(st.Added, file)
+			continue
+		case line[0] == 'D', line[1] == 'D':
+			// Deleted, either from index or working dir.
+			// Note: If it is deleted from index and recreated,
+			// there will be a separate ?? line for the untracked new file,
+			// so the file ends up in both st.Deleted and st.Modified.
+			// This is fine for our purposes.
+			st.Removed = append(st.Removed, file)
+		default:
+			st.Modified = append(st.Modified, file)
+		}
+	}
+	return st
+}
+
+// statusFiles returns the names of files listed in a command such as:
+//
+//	hg status
+//	svn status
+//	fossil changes --differ
+//
+// Each line is assumed to be a status description, then one or more spaces, then a file name.
+// statusFiles returns only the file names.
+func statusFiles(out []byte) []string {
+	// Each line is "xy filename" where x and y are status characters (bytes).
+	var files []string
+	for line := range strings.Lines(string(out)) {
+		_, file, _ := strings.Cut(line, " ")
+		file = strings.TrimSpace(file)
+		if file != "" {
+			files = append(files, file)
+		}
+	}
+	return files
 }
 
 // vcsSvn describes how to use Subversion.
@@ -269,6 +347,7 @@ var vcsSvn = &Cmd{
 
 	Scheme:  []string{"https", "http", "svn", "svn+ssh"},
 	PingCmd: "info -- {scheme}://{repo}",
+	ReadCmd: "cat -- {file}",
 	Status:  svnStatus,
 }
 
@@ -292,12 +371,12 @@ func svnStatus(vcsSvn *Cmd, rootDir string) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	uncommitted := len(out) > 0
+	uncommitted := statusFiles(out)
 
 	return Status{
-		Revision:    rev,
-		CommitTime:  commitTime,
-		Uncommitted: uncommitted,
+		Revision:   rev,
+		CommitTime: commitTime,
+		Modified:   uncommitted,
 	}, nil
 }
 
@@ -314,8 +393,9 @@ var vcsFossil = &Cmd{
 		vcsFileRoot("_FOSSIL_"),
 	},
 
-	Scheme: []string{"https", "http"},
-	Status: fossilStatus,
+	Scheme:  []string{"https", "http"},
+	Status:  fossilStatus,
+	ReadCmd: "cat {file}",
 }
 
 var errFossilInfo = errors.New("unable to parse output of fossil info")
@@ -363,12 +443,12 @@ func fossilStatus(vcsFossil *Cmd, rootDir string) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	uncommitted := len(outb) > 0
+	uncommitted := statusFiles(outb)
 
 	return Status{
-		Revision:    rev,
-		CommitTime:  commitTime,
-		Uncommitted: uncommitted,
+		Revision:   rev,
+		CommitTime: commitTime,
+		Modified:   uncommitted,
 	}, nil
 }
 
@@ -435,14 +515,23 @@ func (v *Cmd) run1(dir string, cmdline string, keyval []string, verbose bool) ([
 	}
 	out, err := cmd.Output()
 	if err != nil {
+		var stderr []byte
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			stderr = ee.Stderr
+		}
 		if verbose || cfg.BuildV {
 			fmt.Fprintf(os.Stderr, "# cd %s; %s %s\n", dir, v.Cmd, strings.Join(args, " "))
-			if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
-				os.Stderr.Write(ee.Stderr)
+			if stderr != nil {
+				os.Stderr.Write(stderr)
 			} else {
 				fmt.Fprintln(os.Stderr, err.Error())
 			}
 		}
+		sep := ""
+		if stderr != nil {
+			sep = "\n\t"
+		}
+		err = fmt.Errorf("%s %s: %v%s%s", v.Cmd, strings.Join(args, " "), err, sep, strings.ReplaceAll(strings.TrimSpace(string(stderr)), "\n", "\n\t"))
 	}
 	return out, err
 }
@@ -466,6 +555,11 @@ func (v *Cmd) Ping(scheme, repo string) error {
 	defer release()
 
 	return v.runVerboseOnly(dir, v.PingCmd, "scheme", scheme, "repo", repo)
+}
+
+// ReadFile reads the current checked-in copy of a file.
+func (v *Cmd) ReadFile(root, file string) ([]byte, error) {
+	return v.runOutputVerboseOnly(root, v.ReadCmd, "file", file)
 }
 
 // A vcsPath describes how to convert an import path into a

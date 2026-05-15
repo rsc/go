@@ -32,7 +32,7 @@ chmod 0755 $WORK/fakebin/git
 ! exec git help
 cd a
 ! go install
-stderr '^error obtaining VCS status: exit status 1\n\tUse -buildvcs=false to disable VCS stamping.$'
+stderr '^error obtaining VCS status: git status.*: exit status 1\n\tUse -buildvcs=false to disable VCS stamping.$'
 go list -e -f '{{.ImportPath}}: {{.Error}}' ./...
 stdout -count=1 '^example\.com/a: error obtaining VCS status'
 stdout -count=1 '^example\.com/a/library: <nil>'
@@ -70,20 +70,151 @@ go version -m $GOBIN/a$GOEXE
 ! stdout vcs.revision
 rm $GOBIN/a$GOEXE
 
-# An untracked file is shown as uncommitted, even if it isn't part of the build.
+# An untracked file is shown as NOT modified when not part of the build based on file name.
 cp ../../outside/empty.txt .
 go install
 go version -m $GOBIN/a$GOEXE
-stdout '^\tbuild\tvcs.modified=true$'
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=false$'
 rm empty.txt
 rm $GOBIN/a$GOEXE
 
-# An edited file is shown as uncommitted, even if it isn't part of the build.
+# An untracked file is shown as NOT modified when not part of the build based on content.
+cp ignore.go ignore2.go
+go install
+go version -m $GOBIN/a$GOEXE
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=false$'
+rm empty.txt
+rm $GOBIN/a$GOEXE
+
+# An untracked file is shown as modified when part of the build.
+cp ../../outside/b.go .
+go install
+go version -m $GOBIN/a$GOEXE
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=true$'
+rm b.go
+rm $GOBIN/a$GOEXE
+
+# A file that would be part of the build that is indexed but deleted is ignored.
+cp z.go z1.go
+exec git add z1.go
+rm z1.go
+go install
+go version -m $GOBIN/a$GOEXE
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=false$'
+exec git rm z1.go
+rm $GOBIN/a$GOEXE
+
+# An edited file is shown as NOT modified when not part of the build.
 cp ../../outside/empty.txt ../README
 go install
 go version -m $GOBIN/a$GOEXE
-stdout '^\tbuild\tvcs.modified=true$'
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=false$'
 exec git checkout ../README
+rm $GOBIN/a$GOEXE
+
+# An edited file is shown as modified when part of the build.
+cp ../../outside/a2.go a.go
+exec git status --porcelain --untracked-files=all --no-renames
+go install
+go version -m $GOBIN/a$GOEXE
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=true$'
+exec git checkout a.go
+rm $GOBIN/a$GOEXE
+
+# Make sure renames are parsed correctly.
+# Rename to file still in build.
+exec git mv a.go a1.go
+go install
+go version -m $GOBIN/a$GOEXE
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=true$'
+exec git mv a1.go a.go
+rm $GOBIN/a$GOEXE
+
+# Remove source file previously in build.
+exec rm z.go
+go install
+exec git status --porcelain --untracked-files=all --no-renames
+go version -m $GOBIN/a$GOEXE
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=true$'
+exec git checkout HEAD z.go
+rm $GOBIN/a$GOEXE
+
+# Remove source file previously in build, but with 'git rm'.
+exec git rm z.go
+go install
+exec git status --porcelain --untracked-files=all --no-renames
+go version -m $GOBIN/a$GOEXE
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=true$'
+exec git checkout HEAD z.go
+rm $GOBIN/a$GOEXE
+
+# Remove source file NOT in build.
+exec rm ignore.go
+go install
+exec git status --porcelain --untracked-files=all --no-renames
+go version -m $GOBIN/a$GOEXE
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=false$'
+exec git checkout HEAD ignore.go
+rm $GOBIN/a$GOEXE
+
+# Remove source file NOT in build, but with 'git rm'.
+exec git rm ignore.go
+go install
+exec git status --porcelain --untracked-files=all --no-renames
+go version -m $GOBIN/a$GOEXE
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=false$'
+exec git checkout HEAD ignore.go
+rm $GOBIN/a$GOEXE
+
+# Edit source file to remove from build.
+exec cp ignore.go z.go
+go install -buildvcs
+exec git status --porcelain --untracked-files=all --no-renames
+go version -m $GOBIN/a$GOEXE
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=true$'
+exec git checkout HEAD z.go
+rm $GOBIN/a$GOEXE
+
+# Again but add to staging area to confirm we check the right base copy.
+exec cp ignore.go z.go
+exec git add z.go
+go install
+exec git status --porcelain --untracked-files=all --no-renames
+go version -m $GOBIN/a$GOEXE
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=true$'
+exec git checkout HEAD z.go
+rm $GOBIN/a$GOEXE
+
+# Rename to file no longer in build.
+exec git mv z.go z.txt
+go install
+exec git status --porcelain --untracked-files=all --no-renames
+go version -m $GOBIN/a$GOEXE
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=true$'
+exec git mv z.txt z.go
+rm $GOBIN/a$GOEXE
+
+# Rename of file previously not in build.
+exec git mv y.txt y.go
+go install
+go version -m $GOBIN/a$GOEXE
+stdout '^\tbuild\tvcs=git\n'
+stdout '^\tbuild\tvcs.modified=true$'
+exec git mv y.go y.txt
 rm $GOBIN/a$GOEXE
 
 # If the build doesn't include any packages from the repository,
@@ -137,6 +268,20 @@ go 1.18
 package main
 
 func main() {}
+-- repo/a/z.go --
+package main
+
+// z.go
+-- repo/a/y.txt --
+package main
+
+// y.txt
+-- repo/a/ignore.go --
+//go:build ignore
+
+package main
+
+// ignore.go
 -- repo/a/library/f.go --
 package library
 -- repo/a/othermain/f.go --
@@ -160,6 +305,13 @@ package main
 
 func main() {}
 -- outside/empty.txt --
+-- outside/b.go --
+package main
+-- outside/a2.go --
+package main
+
+func main() {
+}
 -- outside/c/go.mod --
 module example.com/c
 
