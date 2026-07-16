@@ -299,6 +299,18 @@ type SysProcAttr struct {
 	NoInheritHandles           bool                // if set, no handles are inherited by the new process, not even the standard handles, contained in ProcAttr.Files, nor the ones contained in AdditionalInheritedHandles
 	AdditionalInheritedHandles []Handle            // a list of additional handles, already marked as inheritable, that will be inherited by the new process
 	ParentProcess              Handle              // if non-zero, the new process regards the process given by this handle as its parent process, and AdditionalInheritedHandles, if set, should exist in this parent process
+	Jobs                       []Handle            // if non-nil, start the process with this job object list
+	Console                    Handle              // if non-zero, start the process connected to this console
+	Desktop                    string              // if non-empty, start the process on the named desktop
+	AppContainer               *AppContainer       // if set, create AppContainer process with this metadata
+}
+
+// An AppContainer defines parameters for creating a process in an AppContainer.
+// It is a safe Go version of the Windows SECURITY_CAPABILITIES structure.
+// See https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-security_capabilities.
+type AppContainer struct {
+	SID          *SID
+	Capabilities []SIDAndAttributes
 }
 
 var zeroProcAttr ProcAttr
@@ -374,7 +386,9 @@ func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle 
 	}
 	fd := make([]Handle, len(attr.Files))
 	for i := range attr.Files {
-		if attr.Files[i] > 0 {
+		// If sys.Console is set, must not pass handles for StdInput, StdOutput, StdErr.
+		// To avoid os/exec needing to know this, we just ignore the actual files passed when sys.Console != 0.
+		if sys.Console == 0 && attr.Files[i] > 0 {
 			err := DuplicateHandle(p, Handle(attr.Files[i]), parentProcess, &fd[i], 0, true, DUPLICATE_SAME_ACCESS)
 			if err != nil {
 				return 0, 0, err
@@ -382,7 +396,10 @@ func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle 
 			defer DuplicateHandle(parentProcess, fd[i], 0, nil, 0, false, DUPLICATE_CLOSE_SOURCE)
 		}
 	}
-	procAttrList, err := newProcThreadAttributeList(2)
+
+	// Note: process attributes are documented at
+	// https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute
+	procAttrList, err := newProcThreadAttributeList(10)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -432,6 +449,41 @@ func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle 
 		return 0, 0, err
 	}
 
+	if sys.Jobs != nil {
+		err = procAttrList.update(_PROC_THREAD_ATTRIBUTE_JOB_LIST, unsafe.Pointer(unsafe.SliceData(sys.Jobs)), uintptr(len(sys.Jobs))*unsafe.Sizeof(Handle(0)))
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+
+	if sys.Console != 0 {
+		// Note: You'd expect this to be &sys.Console, but sys.Console is correct.
+		// Windows APIs are not always consistent!
+		err = procAttrList.update(_PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, unsafe.Pointer(sys.Console), unsafe.Sizeof(sys.Console))
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+
+	if sys.Desktop != "" {
+		wdesk, err := UTF16PtrFromString(sys.Desktop)
+		if err != nil {
+			return 0, 0, err
+		}
+		si.Desktop = wdesk
+	}
+
+	if app := sys.AppContainer; app != nil {
+		var sc _SECURITY_CAPABILITIES
+		sc.AppContainerSid = app.SID
+		sc.Capabilities = unsafe.Pointer(unsafe.SliceData(app.Capabilities))
+		sc.CapabilityCount = uint32(len(app.Capabilities))
+		err = procAttrList.update(_PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, unsafe.Pointer(&sc), unsafe.Sizeof(sc))
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+
 	si.ProcThreadAttributeList = procAttrList.list()
 	pi := new(ProcessInformation)
 	flags := sys.CreationFlags | CREATE_UNICODE_ENVIRONMENT | _EXTENDED_STARTUPINFO_PRESENT
@@ -448,6 +500,13 @@ func StartProcess(argv0 string, argv []string, attr *ProcAttr) (pid int, handle 
 	runtime.KeepAlive(sys)
 
 	return int(pi.ProcessId), uintptr(pi.Process), nil
+}
+
+type _SECURITY_CAPABILITIES struct {
+	AppContainerSid *SID
+	Capabilities    unsafe.Pointer
+	CapabilityCount uint32
+	Reserved        uint32
 }
 
 func Exec(argv0 string, argv []string, envv []string) (err error) {
