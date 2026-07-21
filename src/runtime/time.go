@@ -49,6 +49,20 @@ func time_runtimeIsBubbled() bool {
 	return getg().bubble != nil
 }
 
+//go:linkname time_runtimeNanoExternal time.runtimeNanoExternal
+func time_runtimeNanoExternal() int64 {
+	gp := getg()
+	if gp.bubble != nil {
+		return gp.bubble.now
+	}
+	return nanotimeExternal()
+}
+
+//go:linkname time_runtimeExternalIsReal time.runtimeExternalIsReal
+func time_runtimeExternalIsReal() bool {
+	return haveExternalTime
+}
+
 // A timer is a potentially repeating trigger for calling t.f(t.arg, t.seq).
 // Timers are allocated by client code, often as part of other data structures.
 // Each P has a heap of pointers to timers that it manages.

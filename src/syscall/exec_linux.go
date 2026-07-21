@@ -402,7 +402,6 @@ func forkAndExecInChild1(argv0 *byte, argv, envv []*byte, chroot, dir *byte, att
 		pgrp = int32(sys.Pgid)
 		if pgrp == 0 {
 			pid, _ = rawSyscallNoError(SYS_GETPID, 0, 0, 0)
-
 			pgrp = int32(pid)
 		}
 

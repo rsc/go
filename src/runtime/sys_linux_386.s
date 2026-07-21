@@ -401,6 +401,82 @@ finish:
 	MOVL	DX, ret_hi+4(FP)
 	RET
 
+// func nanotimeExternal1() int64
+// Identical to nanotime1 but reads CLOCK_BOOTTIME (7). See go.dev/issue/36141.
+TEXT runtime·nanotimeExternal1(SB), NOSPLIT, $8-8
+	// Switch to g0 stack. See comment above in runtime·walltime.
+
+	MOVL	SP, BP	// Save old SP; BP unchanged by C code.
+
+	get_tls(CX)
+	MOVL	g(CX), AX
+	MOVL	g_m(AX), SI // SI unchanged by C code.
+
+	// Set vdsoPC and vdsoSP for SIGPROF traceback.
+	// Save the old values on stack and restore them on exit,
+	// so this function is reentrant.
+	MOVL	m_vdsoPC(SI), CX
+	MOVL	m_vdsoSP(SI), DX
+	MOVL	CX, 0(SP)
+	MOVL	DX, 4(SP)
+
+	LEAL	ret+0(FP), DX
+	MOVL	-4(DX), CX
+	MOVL	CX, m_vdsoPC(SI)
+	MOVL	DX, m_vdsoSP(SI)
+
+	CMPL	AX, m_curg(SI)	// Only switch if on curg.
+	JNE	noswitch
+
+	MOVL	m_g0(SI), DX
+	MOVL	(g_sched+gobuf_sp)(DX), SP	// Set SP to g0 stack
+
+noswitch:
+	SUBL	$16, SP		// Space for results
+	ANDL	$~15, SP	// Align for C code
+
+	MOVL	runtime·vdsoClockgettimeSym(SB), AX
+	CMPL	AX, $0
+	JEQ	fallback
+
+	LEAL	8(SP), BX	// &ts (struct timespec)
+	MOVL	BX, 4(SP)
+	MOVL	$7, 0(SP)	// CLOCK_BOOTTIME
+	CALL	AX
+	JMP finish
+
+fallback:
+	MOVL	$SYS_clock_gettime, AX
+	MOVL	$7, BX		// CLOCK_BOOTTIME
+	LEAL	8(SP), CX
+	INVOKE_SYSCALL
+
+finish:
+	MOVL	8(SP), AX	// sec
+	MOVL	12(SP), BX	// nsec
+
+	MOVL	BP, SP		// Restore real SP
+	// Restore vdsoPC, vdsoSP
+	// We don't worry about being signaled between the two stores.
+	// If we are not in a signal handler, we'll restore vdsoSP to 0,
+	// and no one will care about vdsoPC. If we are in a signal handler,
+	// we cannot receive another signal.
+	MOVL	4(SP), CX
+	MOVL	CX, m_vdsoSP(SI)
+	MOVL	0(SP), CX
+	MOVL	CX, m_vdsoPC(SI)
+
+	// sec is in AX, nsec in BX
+	// convert to DX:AX nsec
+	MOVL	$1000000000, CX
+	MULL	CX
+	ADDL	BX, AX
+	ADCL	$0, DX
+
+	MOVL	AX, ret_lo+0(FP)
+	MOVL	DX, ret_hi+4(FP)
+	RET
+
 TEXT runtime·rtsigprocmask(SB),NOSPLIT,$0
 	MOVL	$SYS_rt_sigprocmask, AX
 	MOVL	how+0(FP), BX

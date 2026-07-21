@@ -12,6 +12,7 @@
 
 #define CLOCK_REALTIME	0
 #define CLOCK_MONOTONIC	1
+#define CLOCK_BOOTTIME	7
 
 // for EABI, as we don't support OABI
 #define SYS_BASE 0x0
@@ -387,6 +388,38 @@ finish:
 // func nanotime1() int64
 TEXT runtime·nanotime1(SB),NOSPLIT,$12-8
 	MOVW	$CLOCK_MONOTONIC, R0
+	MOVW	$spec-12(SP), R1	// timespec
+
+	MOVW	runtime·vdsoClockgettimeSym(SB), R4
+	CMP	$0, R4
+	B.EQ	fallback
+
+	BL	runtime·vdsoCall(SB)
+
+	JMP	finish
+
+fallback:
+	MOVW	$SYS_clock_gettime, R7
+	SWI	$0
+
+finish:
+	MOVW	sec-12(SP), R0  // sec
+	MOVW	nsec-8(SP), R2  // nsec
+
+	MOVW	$1000000000, R3
+	MULLU	R0, R3, (R1, R0)
+	ADD.S	R2, R0
+	ADC	$0, R1	// Add carry bit to upper half.
+
+	MOVW	R0, ret_lo+0(FP)
+	MOVW	R1, ret_hi+4(FP)
+
+	RET
+
+// func nanotimeExternal1() int64
+// Identical to nanotime1 but reads CLOCK_BOOTTIME (7). See go.dev/issue/36141.
+TEXT runtime·nanotimeExternal1(SB),NOSPLIT,$12-8
+	MOVW	$CLOCK_BOOTTIME, R0
 	MOVW	$spec-12(SP), R1	// timespec
 
 	MOVW	runtime·vdsoClockgettimeSym(SB), R4

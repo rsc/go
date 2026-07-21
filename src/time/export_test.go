@@ -42,6 +42,18 @@ var (
 	TzsetOffset            = tzsetOffset
 )
 
+// IsExternal reports whether t carries an external (real time) monotonic
+// reading. For testing.
+func IsExternal(t *Time) bool {
+	return t.wall&hasMonotonic != 0 && t.ext < 0
+}
+
+// HaveExternalTime reports whether this platform has a real external clock.
+// For testing.
+func HaveExternalTime() bool {
+	return haveExternalTime
+}
+
 func LoadFromEmbeddedTZData(zone string) (string, error) {
 	return loadFromEmbeddedTZData(zone)
 }

@@ -303,6 +303,29 @@ func nanotime1() int64 {
 }
 func nanotime_trampoline()
 
+// nanotimeExternal1 reads the external ("real time") monotonic clock via
+// mach_continuous_time, which, unlike mach_absolute_time used by nanotime1,
+// continues to advance while the system is asleep. See go.dev/issue/36141.
+//
+//go:nosplit
+//go:cgo_unsafe_args
+func nanotimeExternal1() int64 {
+	var r struct {
+		t            int64  // raw timer
+		numer, denom uint32 // conversion factors. nanoseconds = t * numer / denom.
+	}
+	libcCall(unsafe.Pointer(abi.FuncPCABI0(continuoustime_trampoline)), unsafe.Pointer(&r))
+	t := r.t
+	if r.numer != 1 {
+		t *= int64(r.numer)
+	}
+	if r.denom != 1 {
+		t /= int64(r.denom)
+	}
+	return t
+}
+func continuoustime_trampoline()
+
 // walltime should be an internal detail,
 // but widely used packages access it using linkname.
 // Notable members of the hall of shame include:
@@ -603,6 +626,7 @@ func proc_regionfilename_trampoline()
 //go:cgo_import_dynamic libc_mach_vm_region mach_vm_region "/usr/lib/libSystem.B.dylib""
 //go:cgo_import_dynamic libc_mach_timebase_info mach_timebase_info "/usr/lib/libSystem.B.dylib"
 //go:cgo_import_dynamic libc_mach_absolute_time mach_absolute_time "/usr/lib/libSystem.B.dylib"
+//go:cgo_import_dynamic libc_mach_continuous_time mach_continuous_time "/usr/lib/libSystem.B.dylib"
 //go:cgo_import_dynamic libc_clock_gettime clock_gettime "/usr/lib/libSystem.B.dylib"
 //go:cgo_import_dynamic libc_sigaction sigaction "/usr/lib/libSystem.B.dylib"
 //go:cgo_import_dynamic libc_pthread_sigmask pthread_sigmask "/usr/lib/libSystem.B.dylib"

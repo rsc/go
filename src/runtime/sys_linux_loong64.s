@@ -14,6 +14,7 @@
 #define AT_FDCWD	-100
 #define CLOCK_REALTIME	0
 #define CLOCK_MONOTONIC	1
+#define CLOCK_BOOTTIME	7
 
 #define SYS_exit		93
 #define SYS_read		63
@@ -306,6 +307,87 @@ noswitch:
 	AND	$~15, R3	// Align for C code
 
 	MOVW	$CLOCK_MONOTONIC, R4
+	MOVV	$0(R3), R5
+
+	MOVV	runtime·vdsoClockgettimeSym(SB), R20
+	BEQ	R20, fallback
+
+	// Store g on gsignal's stack, see sys_linux_arm64.s for detail
+	MOVBU	runtime·iscgo(SB), R25
+	BNE	R25, nosaveg
+
+	MOVV	m_gsignal(R24), R25	// g.m.gsignal
+	BEQ	R25, nosaveg
+	BEQ	g, R25, nosaveg
+
+	MOVV	(g_stack+stack_lo)(R25), R25	// g.m.gsignal.stack.lo
+	MOVV	g, (R25)
+
+	JAL	(R20)
+
+	MOVV	R0, (R25)
+	JMP	finish
+
+nosaveg:
+	JAL	(R20)
+
+finish:
+	MOVV	0(R3), R7	// sec
+	MOVV	8(R3), R5	// nsec
+
+	MOVV	R23, R3	// restore SP
+	// Restore vdsoPC, vdsoSP
+	// We don't worry about being signaled between the two stores.
+	// If we are not in a signal handler, we'll restore vdsoSP to 0,
+	// and no one will care about vdsoPC. If we are in a signal handler,
+	// we cannot receive another signal.
+	MOVV	16(R3), R25
+	MOVV	R25, m_vdsoSP(R24)
+	MOVV	8(R3), R25
+	MOVV	R25, m_vdsoPC(R24)
+
+	// sec is in R7, nsec in R5
+	// return nsec in R7
+	MOVV	$1000000000, R4
+	MULVU	R4, R7, R7
+	ADDVU	R5, R7, R4
+	RET
+
+fallback:
+	MOVV	$SYS_clock_gettime, R11
+	SYSCALL
+	JMP	finish
+
+// func nanotimeExternal1() int64
+// Identical to nanotime1 but reads CLOCK_BOOTTIME (7). See go.dev/issue/36141.
+TEXT runtime·nanotimeExternal1<ABIInternal>(SB),NOSPLIT,$24
+	MOVV	R3, R23	// R23 is unchanged by C code
+
+	MOVV	g_m(g), R24	// R24 = m
+
+	// Set vdsoPC and vdsoSP for SIGPROF traceback.
+	// Save the old values on stack and restore them on exit,
+	// so this function is reentrant.
+	MOVV	m_vdsoPC(R24), R11
+	MOVV	m_vdsoSP(R24), R7
+	MOVV	R11, 8(R3)
+	MOVV	R7, 16(R3)
+
+	MOVV    $ret-8(FP), R11 // caller's SP
+	MOVV	R1, m_vdsoPC(R24)
+	MOVV	R11, m_vdsoSP(R24)
+
+	MOVV	m_curg(R24), R4
+	BNE	R4, g, noswitch
+
+	MOVV	m_g0(R24), R4
+	MOVV	(g_sched+gobuf_sp)(R4), R3	// Set SP to g0 stack
+
+noswitch:
+	SUBV	$16, R3
+	AND	$~15, R3	// Align for C code
+
+	MOVW	$CLOCK_BOOTTIME, R4
 	MOVV	$0(R3), R5
 
 	MOVV	runtime·vdsoClockgettimeSym(SB), R20

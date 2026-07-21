@@ -265,6 +265,28 @@ func nanotime1() int64 {
 }
 func clock_gettime_trampoline()
 
+// nanotimeExternal1 reads the external ("real time") monotonic clock via
+// clock_gettime(CLOCK_BOOTTIME), which, unlike CLOCK_MONOTONIC used by
+// nanotime1, continues to advance while the system is asleep.
+// See go.dev/issue/36141.
+//
+//go:nosplit
+func nanotimeExternal1() int64 {
+	var ts timespec
+	args := struct {
+		clock_id int32
+		tp       unsafe.Pointer
+	}{_CLOCK_BOOTTIME, unsafe.Pointer(&ts)}
+	if errno := libcCall(unsafe.Pointer(abi.FuncPCABI0(clock_gettime_trampoline)), unsafe.Pointer(&args)); errno < 0 {
+		// Avoid growing the nosplit stack.
+		systemstack(func() {
+			println("runtime: errno", -errno)
+			throw("clock_gettime failed")
+		})
+	}
+	return ts.tv_sec*1e9 + int64(ts.tv_nsec)
+}
+
 //go:nosplit
 func walltime() (int64, int32) {
 	var ts timespec

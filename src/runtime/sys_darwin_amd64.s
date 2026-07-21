@@ -112,6 +112,30 @@ initialized:
 	MOVL	DI, 12(BX)
 	RET
 
+TEXT runtime·continuoustime_trampoline(SB),NOSPLIT,$0
+	MOVQ	DI, BX
+	CALL	libc_mach_continuous_time(SB)
+	MOVQ	AX, 0(BX)
+	MOVL	timebase<>+machTimebaseInfo_numer(SB), SI
+	MOVL	timebase<>+machTimebaseInfo_denom(SB), DI // atomic read
+	TESTL	DI, DI
+	JNE	initialized
+	SUBQ	$(machTimebaseInfo__size+15)/16*16, SP
+	MOVQ	SP, DI
+	CALL	libc_mach_timebase_info(SB)
+	MOVL	machTimebaseInfo_numer(SP), SI
+	MOVL	machTimebaseInfo_denom(SP), DI
+	ADDQ	$(machTimebaseInfo__size+15)/16*16, SP
+
+	MOVL	SI, timebase<>+machTimebaseInfo_numer(SB)
+	MOVL	DI, AX
+	XCHGL	AX, timebase<>+machTimebaseInfo_denom(SB) // atomic write
+
+initialized:
+	MOVL	SI, 8(BX)
+	MOVL	DI, 12(BX)
+	RET
+
 TEXT runtime·walltime_trampoline(SB),NOSPLIT,$0
 	MOVQ	DI, SI			// arg 2 timespec
 	MOVL	$CLOCK_REALTIME, DI	// arg 1 clock_id

@@ -284,6 +284,37 @@ TEXT runtime·nanotime1(SB),NOSPLIT,$8-8
 #endif
 	RET
 
+// func nanotimeExternal1() int64
+// Identical to nanotime1 but reads CLOCK_BOOTTIME (7). See go.dev/issue/36141.
+TEXT runtime·nanotimeExternal1(SB),NOSPLIT,$8-8
+	MOVW	$7, R4	// CLOCK_BOOTTIME
+	MOVW	$4(R29), R5
+	MOVW	$SYS_clock_gettime, R2
+	SYSCALL
+	MOVW	4(R29), R3	// sec
+	MOVW	8(R29), R5	// nsec
+	// sec is in R3, nsec in R5
+	// return nsec in R3
+	MOVW	$1000000000, R4
+	MULU	R4, R3
+	MOVW	LO, R3
+	ADDU	R5, R3
+	SGTU	R5, R3, R4
+	MOVW	$ret+0(FP), R6
+#ifdef GOARCH_mips
+	MOVW	R3, 4(R6)
+#else
+	MOVW	R3, 0(R6)
+#endif
+	MOVW	HI, R3
+	ADDU	R4, R3
+#ifdef GOARCH_mips
+	MOVW	R3, 0(R6)
+#else
+	MOVW	R3, 4(R6)
+#endif
+	RET
+
 TEXT runtime·rtsigprocmask(SB),NOSPLIT,$0-16
 	MOVW	how+0(FP), R4
 	MOVW	new+4(FP), R5

@@ -168,6 +168,31 @@ initialized:
 	MOVW	R21, 12(R19)
 	RET
 
+TEXT runtime·continuoustime_trampoline(SB),NOSPLIT,$40
+	MOVD	R0, R19
+	BL	libc_mach_continuous_time(SB)
+	MOVD	R0, 0(R19)
+	MOVW	timebase<>+machTimebaseInfo_numer(SB), R20
+	MOVD	$timebase<>+machTimebaseInfo_denom(SB), R21
+	LDARW	(R21), R21	// atomic read
+	CMP	$0, R21
+	BNE	initialized
+	SUB	$(machTimebaseInfo__size+15)/16*16, RSP
+	MOVD	RSP, R0
+	BL	libc_mach_timebase_info(SB)
+	MOVW	machTimebaseInfo_numer(RSP), R20
+	MOVW	machTimebaseInfo_denom(RSP), R21
+	ADD	$(machTimebaseInfo__size+15)/16*16, RSP
+
+	MOVW	R20, timebase<>+machTimebaseInfo_numer(SB)
+	MOVD	$timebase<>+machTimebaseInfo_denom(SB), R22
+	STLRW	R21, (R22)	// atomic write
+
+initialized:
+	MOVW	R20, 8(R19)
+	MOVW	R21, 12(R19)
+	RET
+
 TEXT runtime·sigfwd(SB),NOSPLIT,$0-32
 	MOVW	sig+8(FP), R0
 	MOVD	info+16(FP), R1

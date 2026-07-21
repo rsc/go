@@ -80,6 +80,30 @@
 // clock reading if present. If t != u because of different monotonic clock readings,
 // that difference will be visible when printing t.String() and u.String().
 //
+// # External (Real Time) Clocks
+//
+// The monotonic clock read by [Now] is the "program time" clock: it measures
+// elapsed time while the program runs but stops advancing while the system is
+// asleep (suspended). A 30-second timer armed just before the machine sleeps
+// for ten minutes therefore fires roughly 30 seconds of awake time later, not
+// 30 seconds of real-world time later.
+//
+// [ExternalNow] instead reads the "real time" (external) monotonic clock,
+// which keeps advancing across system sleep (CLOCK_BOOTTIME on Linux and
+// OpenBSD, mach_continuous_time on Darwin). It is intended for timeouts that
+// must elapse in the real world regardless of sleep, such as network protocol
+// keepalives and handshakes.
+//
+// A Time records which monotonic clock it carries. [Time.Sub], [Since], and
+// [Until] use the monotonic reading only when both instants come from the same
+// clock; mixing an external-clock Time with an internal-clock Time (or with a
+// Time that has no monotonic reading) falls back to comparing wall clock
+// readings, and never panics. [Since] and [Until] automatically pick [Now] or
+// [ExternalNow] to match the clock of their argument.
+//
+// On platforms without a distinct real-time clock, ExternalNow behaves exactly
+// like Now, so code may use the external functions unconditionally.
+//
 // # Timer Resolution
 //
 // [Timer] resolution varies depending on the Go runtime, the operating system
@@ -148,7 +172,24 @@ type Time struct {
 	// and the full signed 64-bit wall seconds since Jan 1 year 1 is stored in ext.
 	// If the hasMonotonic bit is 1, then the 33-bit field holds a 33-bit
 	// unsigned wall seconds since Jan 1 year 1885, and ext holds a
-	// signed 64-bit monotonic clock reading, nanoseconds since process start.
+	// monotonic clock reading in nanoseconds since process start, encoded
+	// as described below.
+	//
+	// When the hasMonotonic bit is 1, the high bit of ext (monoExternal)
+	// records which monotonic clock the reading is from:
+	//   - If the high bit is 0, ext holds an internal ("program time")
+	//     monotonic reading, which stops advancing while the system sleeps.
+	//   - If the high bit is 1, ext holds an external ("real time") monotonic
+	//     reading, which continues advancing while the system sleeps.
+	// The reading itself is a signed offset in nanoseconds since process
+	// start, stored as a 63-bit two's-complement value in the low 63 bits of
+	// ext (so its magnitude must stay under 2^62 ns ≈ 146 years; readings that
+	// would exceed this cause the monotonic reading to be dropped). The high
+	// bit is reserved for the clock flag rather than as the sign bit, because
+	// an internal reading can legitimately be negative (for example, from
+	// time.Now().Add(-d)), so the sign bit is not free. Use monoVal to recover
+	// the signed reading and encodeMono to store one; only readings from the
+	// same clock may be compared or subtracted (see sameClock).
 	wall uint64
 	ext  int64
 
@@ -166,7 +207,41 @@ const (
 	minWall      = wallToInternal               // year 1885
 	nsecMask     = 1<<30 - 1
 	nsecShift    = 30
+
+	// monoExternal is the high bit of ext, set when the monotonic clock
+	// reading stored in ext is on the external (real time) clock rather
+	// than the internal (program time) clock. See the Time struct comment.
+	monoExternal = -1 << 63
 )
+
+// sameClock reports whether t and u both carry monotonic clock readings from
+// the same clock (both internal/program time or both external/real time), so
+// that their ext fields may be compared or subtracted directly. When it
+// returns false, callers fall back to wall-clock comparison.
+func sameClock(t, u Time) bool {
+	return t.wall&u.wall&hasMonotonic != 0 && (t.ext < 0) == (u.ext < 0)
+}
+
+// monoVal returns the signed monotonic clock reading (nanoseconds since
+// process start) stored in an ext field, ignoring the monoExternal clock flag
+// in the high bit. It sign-extends the 63-bit two's-complement reading held in
+// the low 63 bits: shifting left by one drops the flag bit and moves the
+// reading's sign bit (bit 62) into the sign position, and the arithmetic shift
+// right restores it.
+func monoVal(ext int64) int64 {
+	return ext << 1 >> 1
+}
+
+// encodeMono packs the signed monotonic reading v into an ext field, setting
+// the monoExternal clock flag when external is true. v must be within the
+// 63-bit range (±2^62 ns); callers detect out-of-range readings separately.
+func encodeMono(v int64, external bool) int64 {
+	e := v &^ monoExternal // low 63 bits: 63-bit two's-complement reading
+	if external {
+		e |= monoExternal
+	}
+	return e
+}
 
 // These helpers for manipulating the wall and monotonic clock readings
 // take pointer receivers, even when they don't modify the time,
@@ -242,7 +317,7 @@ func (t *Time) setMono(m int64) {
 		}
 		t.wall |= hasMonotonic | uint64(sec-minWall)<<nsecShift
 	}
-	t.ext = m
+	t.ext = encodeMono(m, false)
 }
 
 // mono returns t's monotonic clock reading.
@@ -254,7 +329,7 @@ func (t *Time) mono() int64 {
 	if t.wall&hasMonotonic == 0 {
 		return 0
 	}
-	return t.ext
+	return monoVal(t.ext)
 }
 
 // IsZero reports whether t represents the zero time instant,
@@ -269,8 +344,8 @@ func (t Time) IsZero() bool {
 
 // After reports whether the time instant t is after u.
 func (t Time) After(u Time) bool {
-	if t.wall&u.wall&hasMonotonic != 0 {
-		return t.ext > u.ext
+	if sameClock(t, u) {
+		return monoVal(t.ext) > monoVal(u.ext)
 	}
 	ts := t.sec()
 	us := u.sec()
@@ -279,8 +354,8 @@ func (t Time) After(u Time) bool {
 
 // Before reports whether the time instant t is before u.
 func (t Time) Before(u Time) bool {
-	if t.wall&u.wall&hasMonotonic != 0 {
-		return t.ext < u.ext
+	if sameClock(t, u) {
+		return monoVal(t.ext) < monoVal(u.ext)
 	}
 	ts := t.sec()
 	us := u.sec()
@@ -291,8 +366,8 @@ func (t Time) Before(u Time) bool {
 // if t is after u, it returns +1; if they're the same, it returns 0.
 func (t Time) Compare(u Time) int {
 	var tc, uc int64
-	if t.wall&u.wall&hasMonotonic != 0 {
-		tc, uc = t.ext, u.ext
+	if sameClock(t, u) {
+		tc, uc = monoVal(t.ext), monoVal(u.ext)
 	} else {
 		tc, uc = t.sec(), u.sec()
 		if tc == uc {
@@ -314,7 +389,7 @@ func (t Time) Compare(u Time) int {
 // See the documentation on the Time type for the pitfalls of using == with
 // Time values; most code should use Equal instead.
 func (t Time) Equal(u Time) bool {
-	if t.wall&u.wall&hasMonotonic != 0 {
+	if sameClock(t, u) {
 		return t.ext == u.ext
 	}
 	return t.sec() == u.sec() && t.nsec() == u.nsec()
@@ -1180,12 +1255,14 @@ func (t Time) Add(d Duration) Time {
 	t.wall = t.wall&^nsecMask | uint64(nsec) // update nsec
 	t.addSec(dsec)
 	if t.wall&hasMonotonic != 0 {
-		te := t.ext + int64(d)
-		if d < 0 && te > t.ext || d > 0 && te < t.ext {
-			// Monotonic clock reading now out of range; degrade to wall-only.
+		v := monoVal(t.ext)
+		nv := v + int64(d)
+		if d < 0 && nv > v || d > 0 && nv < v || nv != monoVal(nv) {
+			// Monotonic clock reading now out of range (either int64 overflow
+			// or outside the 63-bit reading range); degrade to wall-only.
 			t.stripMono()
 		} else {
-			t.ext = te
+			t.ext = encodeMono(nv, t.ext&monoExternal != 0)
 		}
 	}
 	return t
@@ -1196,8 +1273,8 @@ func (t Time) Add(d Duration) Time {
 // will be returned.
 // To compute t-d for a duration d, use t.Add(-d).
 func (t Time) Sub(u Time) Duration {
-	if t.wall&u.wall&hasMonotonic != 0 {
-		return subMono(t.ext, u.ext)
+	if sameClock(t, u) {
+		return subMono(monoVal(t.ext), monoVal(u.ext))
 	}
 	d := Duration(t.sec()-u.sec())*Second + Duration(t.nsec()-u.nsec())
 	// Check for overflow or underflow.
@@ -1223,21 +1300,31 @@ func subMono(t, u int64) Duration {
 }
 
 // Since returns the time elapsed since t.
-// It is shorthand for time.Now().Sub(t).
+// It is shorthand for time.Now().Sub(t), except that if t carries an
+// external (real time) monotonic reading, it is shorthand for
+// time.ExternalNow().Sub(t).
 func Since(t Time) Duration {
 	if t.wall&hasMonotonic != 0 && !runtimeIsBubbled() {
 		// Common case optimization: if t has monotonic time, then Sub will use only it.
-		return subMono(runtimeNano()-startNano, t.ext)
+		if t.ext < 0 { // external (real time) reading
+			return subMono(externalNano(), monoVal(t.ext))
+		}
+		return subMono(runtimeNano()-startNano, monoVal(t.ext))
 	}
 	return Now().Sub(t)
 }
 
 // Until returns the duration until t.
-// It is shorthand for t.Sub(time.Now()).
+// It is shorthand for t.Sub(time.Now()), except that if t carries an
+// external (real time) monotonic reading, it is shorthand for
+// t.Sub(time.ExternalNow()).
 func Until(t Time) Duration {
 	if t.wall&hasMonotonic != 0 && !runtimeIsBubbled() {
 		// Common case optimization: if t has monotonic time, then Sub will use only it.
-		return subMono(t.ext, runtimeNano()-startNano)
+		if t.ext < 0 { // external (real time) reading
+			return subMono(monoVal(t.ext), externalNano())
+		}
+		return subMono(monoVal(t.ext), runtimeNano()-startNano)
 	}
 	return t.Sub(Now())
 }
@@ -1332,6 +1419,22 @@ func runtimeNano() int64
 //go:linkname runtimeIsBubbled
 func runtimeIsBubbled() bool
 
+// runtimeNanoExternal returns the current value of the runtime's external
+// ("real time") monotonic clock in nanoseconds. This clock continues to
+// advance while the system is asleep. On platforms without such a clock it
+// returns the internal (program time) clock and runtimeExternalIsReal reports
+// false. When called within a synctest.Run bubble, it returns the group's fake
+// clock.
+//
+//go:linkname runtimeNanoExternal
+func runtimeNanoExternal() int64
+
+// runtimeExternalIsReal reports whether runtimeNanoExternal is backed by a
+// real external clock distinct from the internal clock on this platform.
+//
+//go:linkname runtimeExternalIsReal
+func runtimeExternalIsReal() bool
+
 // Monotonic times are reported as offsets from startNano.
 // We initialize startNano to runtimeNano() - 1 so that on systems where
 // monotonic time resolution is fairly low (e.g. Windows 2008
@@ -1339,6 +1442,23 @@ func runtimeIsBubbled() bool
 // we avoid ever reporting a monotonic time of 0.
 // (Callers may want to use 0 as "time not set".)
 var startNano int64 = runtimeNano() - 1
+
+// External (real time) monotonic times are reported as offsets from
+// startNanoExternal, analogous to startNano.
+var startNanoExternal int64 = runtimeNanoExternal() - 1
+
+// haveExternalTime reports whether this platform has a real external clock,
+// so that ExternalNow and the External timer functions can tag their results
+// as external. When false, the External functions behave exactly like their
+// internal counterparts.
+var haveExternalTime = runtimeExternalIsReal()
+
+// externalNano returns the current external (real time) monotonic reading as
+// a raw signed offset in nanoseconds since startNanoExternal (no monoExternal
+// flag). Use encodeMono to store it in a Time's ext field.
+func externalNano() int64 {
+	return runtimeNanoExternal() - startNanoExternal
+}
 
 // x/tools uses a linkname of time.Now in its tests. No harm done.
 //go:linkname Now
@@ -1355,6 +1475,49 @@ func Now() Time {
 		// Seconds field overflowed the 33 bits available when
 		// storing a monotonic time. This will be true after
 		// March 16, 2157.
+		return Time{uint64(nsec), sec + minWall, Local}
+	}
+	return Time{hasMonotonic | uint64(sec)<<nsecShift | uint64(nsec), mono, Local}
+}
+
+// ExternalNow returns the current local time, like [Now], but the returned
+// time carries a reading of the external ("real time") monotonic clock, which
+// continues to advance while the system is asleep, rather than the internal
+// ("program time") monotonic clock used by Now, which stops while the system
+// is asleep.
+//
+// The external monotonic reading is used by [Time.Sub], [Since], and [Until]
+// when both operands come from the same clock. Subtracting times from
+// different monotonic clocks (for example, one from Now and one from
+// ExternalNow) falls back to comparing wall clock readings, as when one
+// operand has no monotonic reading at all.
+//
+// On platforms that do not provide an external clock, ExternalNow behaves
+// exactly like Now, and the resulting times are ordinary internal-clock times.
+//
+// See the "Monotonic Clocks" section in the package documentation for details.
+func ExternalNow() Time {
+	sec, nsec, mono := runtimeNow()
+	if mono == 0 || !haveExternalTime {
+		// No monotonic reading available (for example, inside a synctest
+		// bubble), or no distinct external clock on this platform: fall back
+		// to Now's behavior so external times equal internal times.
+		if mono == 0 {
+			return Time{uint64(nsec), sec + unixToInternal, Local}
+		}
+		mono -= startNano
+		sec += unixToInternal - minWall
+		if uint64(sec)>>33 != 0 {
+			return Time{uint64(nsec), sec + minWall, Local}
+		}
+		return Time{hasMonotonic | uint64(sec)<<nsecShift | uint64(nsec), mono, Local}
+	}
+	// Replace the internal monotonic reading with an external one and tag it.
+	mono = encodeMono(externalNano(), true)
+	sec += unixToInternal - minWall
+	if uint64(sec)>>33 != 0 {
+		// Seconds field overflowed the 33 bits available when storing a
+		// monotonic time. This will be true after March 16, 2157.
 		return Time{uint64(nsec), sec + minWall, Local}
 	}
 	return Time{hasMonotonic | uint64(sec)<<nsecShift | uint64(nsec), mono, Local}

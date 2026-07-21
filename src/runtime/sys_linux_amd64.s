@@ -297,6 +297,78 @@ fallback:
 	SYSCALL
 	JMP	ret
 
+// func nanotimeExternal1() int64
+// Identical to nanotime1 but reads CLOCK_BOOTTIME (7), the external
+// ("real time") clock that continues advancing while the system is asleep.
+// See go.dev/issue/36141.
+TEXT runtime·nanotimeExternal1(SB),NOSPLIT,$16-8
+	// We don't know how much stack space the VDSO code will need,
+	// so switch to g0. See nanotime1 above for details.
+
+#ifdef GOEXPERIMENT_runtimesecret
+	// The kernel might spill our secrets onto g0
+	// erase our registers here.
+	CMPL	g_secret(R14), $0
+	JEQ	nosecret
+	CALL	·secretEraseRegisters(SB)
+
+nosecret:
+#endif
+
+	MOVQ	SP, R12	// Save old SP; R12 unchanged by C code.
+
+	MOVQ	g_m(R14), BX // BX unchanged by C code.
+
+	// Set vdsoPC and vdsoSP for SIGPROF traceback.
+	// Save the old values on stack and restore them on exit,
+	// so this function is reentrant.
+	MOVQ	m_vdsoPC(BX), CX
+	MOVQ	m_vdsoSP(BX), DX
+	MOVQ	CX, 0(SP)
+	MOVQ	DX, 8(SP)
+
+	LEAQ	ret+0(FP), DX
+	MOVQ	-8(DX), CX
+	MOVQ	CX, m_vdsoPC(BX)
+	MOVQ	DX, m_vdsoSP(BX)
+
+	CMPQ	R14, m_curg(BX)	// Only switch if on curg.
+	JNE	noswitch
+
+	MOVQ	m_g0(BX), DX
+	MOVQ	(g_sched+gobuf_sp)(DX), SP	// Set SP to g0 stack
+
+noswitch:
+	SUBQ	$16, SP		// Space for results
+	ANDQ	$~15, SP	// Align for C code
+
+	MOVL	$7, DI // CLOCK_BOOTTIME
+	LEAQ	0(SP), SI
+	MOVQ	runtime·vdsoClockgettimeSym(SB), AX
+	CMPQ	AX, $0
+	JEQ	fallback
+	CALL	AX
+ret:
+	MOVQ	0(SP), AX	// sec
+	MOVQ	8(SP), DX	// nsec
+	MOVQ	R12, SP		// Restore real SP
+	// Restore vdsoPC, vdsoSP
+	// We don't worry about being signaled between the two stores.
+	MOVQ	8(SP), CX
+	MOVQ	CX, m_vdsoSP(BX)
+	MOVQ	0(SP), CX
+	MOVQ	CX, m_vdsoPC(BX)
+	// sec is in AX, nsec in DX
+	// return nsec in AX
+	IMULQ	$1000000000, AX
+	ADDQ	DX, AX
+	MOVQ	AX, ret+0(FP)
+	RET
+fallback:
+	MOVQ	$SYS_clock_gettime, AX
+	SYSCALL
+	JMP	ret
+
 TEXT runtime·rtsigprocmask(SB),NOSPLIT,$0-28
 	MOVL	how+0(FP), DI
 	MOVQ	new+8(FP), SI

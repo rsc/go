@@ -548,9 +548,10 @@ func (t Time) String() string {
 
 	// Format monotonic clock reading as m=±ddd.nnnnnnnnn.
 	if t.wall&hasMonotonic != 0 {
-		m2 := uint64(t.ext)
+		m := monoVal(t.ext)
+		m2 := uint64(m)
 		sign := byte('+')
-		if t.ext < 0 {
+		if m < 0 {
 			sign = '-'
 			m2 = -m2
 		}

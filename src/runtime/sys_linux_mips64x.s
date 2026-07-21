@@ -369,6 +369,81 @@ fallback:
 	SYSCALL
 	JMP	finish
 
+// func nanotimeExternal1() int64
+// Identical to nanotime1 but reads CLOCK_BOOTTIME (7). See go.dev/issue/36141.
+TEXT runtime·nanotimeExternal1(SB),NOSPLIT,$16-8
+	MOVV	R29, R16	// R16 is unchanged by C code
+	MOVV	R29, R1
+
+	MOVV	g_m(g), R17	// R17 = m
+
+	// Set vdsoPC and vdsoSP for SIGPROF traceback.
+	// Save the old values on stack and restore them on exit,
+	// so this function is reentrant.
+	MOVV	m_vdsoPC(R17), R2
+	MOVV	m_vdsoSP(R17), R3
+	MOVV	R2, 8(R29)
+	MOVV	R3, 16(R29)
+
+	MOVV	$ret-8(FP), R2 // caller's SP
+	MOVV	R31, m_vdsoPC(R17)
+	MOVV	R2, m_vdsoSP(R17)
+
+	MOVV	m_curg(R17), R4
+	MOVV	g, R5
+	BNE	R4, R5, noswitch
+
+	MOVV	m_g0(R17), R4
+	MOVV	(g_sched+gobuf_sp)(R4), R1	// Set SP to g0 stack
+
+noswitch:
+	SUBV	$16, R1
+	AND	$~15, R1	// Align for C code
+	MOVV	R1, R29
+
+	MOVW	$7, R4 // CLOCK_BOOTTIME
+	MOVV	$0(R29), R5
+
+	MOVV	runtime·vdsoClockgettimeSym(SB), R25
+	BEQ	R25, fallback
+
+	JAL	(R25)
+	// see walltime for detail
+	BEQ	R2, R0, finish
+	MOVV	R0, runtime·vdsoClockgettimeSym(SB)
+	MOVW	$7, R4 // CLOCK_BOOTTIME
+	MOVV	$0(R29), R5
+	JMP	fallback
+
+finish:
+	MOVV	0(R29), R3	// sec
+	MOVV	8(R29), R5	// nsec
+
+	MOVV	R16, R29	// restore SP
+	// Restore vdsoPC, vdsoSP
+	// We don't worry about being signaled between the two stores.
+	// If we are not in a signal handler, we'll restore vdsoSP to 0,
+	// and no one will care about vdsoPC. If we are in a signal handler,
+	// we cannot receive another signal.
+	MOVV	16(R29), R1
+	MOVV	R1, m_vdsoSP(R17)
+	MOVV	8(R29), R1
+	MOVV	R1, m_vdsoPC(R17)
+
+	// sec is in R3, nsec in R5
+	// return nsec in R3
+	MOVV	$1000000000, R4
+	MULVU	R4, R3
+	MOVV	LO, R3
+	ADDVU	R5, R3
+	MOVV	R3, ret+0(FP)
+	RET
+
+fallback:
+	MOVV	$SYS_clock_gettime, R2
+	SYSCALL
+	JMP	finish
+
 TEXT runtime·rtsigprocmask(SB),NOSPLIT|NOFRAME,$0-28
 	MOVW	how+0(FP), R4
 	MOVV	new+8(FP), R5

@@ -257,9 +257,10 @@ var monotonicStringTests = []struct {
 	{-123456789, "m=-0.123456789"},
 	{123456789000, "m=+123.456789000"},
 	{-123456789000, "m=-123.456789000"},
-	{9e18, "m=+9000000000.000000000"},
-	{-9e18, "m=-9000000000.000000000"},
-	{-1 << 63, "m=-9223372036.854775808"},
+	// The monotonic reading is stored in 63 bits (the high bit of ext is the
+	// internal/external clock flag), so its range is ±(2^62) ns ≈ ±146 years.
+	{1<<62 - 1, "m=+4611686018.427387903"},
+	{-(1 << 62), "m=-4611686018.427387904"},
 }
 
 func TestMonotonicString(t *testing.T) {

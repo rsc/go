@@ -59,8 +59,14 @@ func CheckRuntimeTimerPeriodOverflow() {
 }
 
 var (
-	MinMonoTime = Time{wall: 1 << 63, ext: -1 << 63, loc: UTC}
-	MaxMonoTime = Time{wall: 1 << 63, ext: 1<<63 - 1, loc: UTC}
+	// The monotonic reading is stored as a 63-bit two's-complement value in
+	// the low 63 bits of ext (the high bit is the internal/external clock
+	// flag), so the representable range is [-(1<<62), 1<<62). These are the
+	// extreme in-range internal (program-time) readings:
+	//   MaxMonoTime reading =  1<<62 - 1  (ext bit 63 = 0)
+	//   MinMonoTime reading = -(1 << 62)  (encoded as ext == 1<<62)
+	MinMonoTime = Time{wall: 1 << 63, ext: 1 << 62, loc: UTC}
+	MaxMonoTime = Time{wall: 1 << 63, ext: 1<<62 - 1, loc: UTC}
 
 	NotMonoNegativeTime = Time{wall: 0, ext: -1<<63 + 50}
 )

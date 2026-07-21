@@ -24,6 +24,8 @@ const (
 	_CLOCK_VIRTUAL   = 1
 	_CLOCK_PROF      = 2
 	_CLOCK_MONOTONIC = 3
+	_CLOCK_UPTIME    = 5
+	_CLOCK_BOOTTIME  = 6 // like _CLOCK_MONOTONIC but keeps advancing during system sleep
 )
 
 type sigset uint32
