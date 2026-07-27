@@ -562,6 +562,7 @@ const (
 	STATUS_INVALID_PARAMETER         NTStatus = 0xC000000D
 	STATUS_INVALID_INFO_CLASS        NTStatus = 0xC0000003
 	STATUS_ACCESS_DENIED             NTStatus = 0xC0000022
+	STATUS_INFO_LENGTH_MISMATCH      NTStatus = 0xC0000004
 )
 
 const (
@@ -573,6 +574,19 @@ type FILE_MODE_INFORMATION struct {
 	Mode uint32
 }
 
+// OBJECT_INFORMATION_CLASS values for NtQueryObject.
+const (
+	ObjectNameInformation = 1
+)
+
+// OBJECT_NAME_INFORMATION is the structure returned by NtQueryObject when
+// called with the ObjectNameInformation class. For a Winsock socket the
+// Name is `\Device\Afd`.
+// https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntqueryobject
+type OBJECT_NAME_INFORMATION struct {
+	Name NTUnicodeString
+}
+
 //sys	IsProcessorFeaturePresent(ProcessorFeature uint32) (ret bool) = kernel32.IsProcessorFeaturePresent
 
 // NT Native APIs
@@ -582,6 +596,7 @@ type FILE_MODE_INFORMATION struct {
 //sys   NtSetInformationFile(handle syscall.Handle, iosb *IO_STATUS_BLOCK, inBuffer unsafe.Pointer, inBufferLen uint32, class uint32) (ntstatus error) = ntdll.NtSetInformationFile
 //sys	RtlIsDosDeviceName_U(name *uint16) (ret uint32) = ntdll.RtlIsDosDeviceName_U
 //sys   NtQueryInformationFile(handle syscall.Handle, iosb *IO_STATUS_BLOCK, inBuffer unsafe.Pointer, inBufferLen uint32, class uint32) (ntstatus error) = ntdll.NtQueryInformationFile
+//sys   NtQueryObject(handle syscall.Handle, class uint32, outBuffer unsafe.Pointer, outBufferLen uint32, retLen *uint32) (ntstatus error) = ntdll.NtQueryObject
 
 //sys	SetEntriesInAcl(countExplicitEntries uint32, explicitEntries *EXPLICIT_ACCESS, oldACL *ACL, newACL **ACL) (ret error) =  advapi32.SetEntriesInAclW
 //sys	SetNamedSecurityInfo(objectName string, objectType uint32, securityInformation uint32, owner *syscall.SID, group *syscall.SID, dacl *ACL, sacl *ACL) (ret error) = advapi32.SetNamedSecurityInfoW

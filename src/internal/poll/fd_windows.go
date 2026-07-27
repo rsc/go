@@ -486,6 +486,12 @@ func (fd *FD) Init(net string, pollable bool) error {
 	return nil
 }
 
+// IsSocket reports whether fd is a network socket.
+// The result is only meaningful after Init has been called.
+func (fd *FD) IsSocket() bool {
+	return fd.kind == kindNet
+}
+
 // DisassociateIOCP disassociates the file handle from the IOCP.
 // The disassociate operation will not succeed if there is any
 // in-progress I/O operation on the file handle.

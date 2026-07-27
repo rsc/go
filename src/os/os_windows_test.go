@@ -15,6 +15,7 @@ import (
 	"internal/testenv"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2378,4 +2379,120 @@ func TestNewFileStdinBlocked(t *testing.T) {
 		t.Fatal(err)
 	}
 	wg.Wait() // Don't leave goroutines behind.
+}
+
+// TestNewFileNetConn checks that passing the Fd of a network
+// connection's File to NewFile produces a File that is recognized and driven
+// as a network socket, rather than being mistaken for an ordinary file or
+// pipe. On Windows a socket handle is otherwise indistinguishable from a named
+// pipe (both report FILE_TYPE_PIPE), so NewFile detects sockets by their NT
+// object name, which is `\Device\Afd`.
+func TestNewFileNetConn(t *testing.T) {
+	client, server := createSocketPair(t, "tcp")
+
+	cf, err := client.(*net.TCPConn).File()
+	if err != nil {
+		t.Fatalf("(*net.TCPConn).File: %v", err)
+	}
+	// cf and f share the same underlying handle (f wraps cf.Fd()), so both
+	// are closed back-to-back at the end of the test. There is no handle
+	// allocation between the two closes, so the handle cannot be reused and
+	// the second (redundant) close is harmless.
+	defer cf.Close()
+
+	fd := cf.Fd()
+
+	// Sanity check the underlying detection mechanism: a socket handle's NT
+	// object name is `\Device\Afd`.
+	name, err := windows.GetObjectName(syscall.Handle(fd))
+	if err != nil {
+		t.Fatalf("GetObjectName(socket) failed: %v", err)
+	}
+	if name != `\Device\Afd` {
+		t.Fatalf("GetObjectName(socket) = %q, want %q", name, `\Device\Afd`)
+	}
+
+	f := os.NewFile(fd, "socket")
+	if f == nil {
+		t.Fatal("NewFile returned nil")
+	}
+	defer f.Close()
+
+	if !os.FileIsSocket(f) {
+		t.Fatal("NewFile did not recognize a network connection handle as a socket")
+	}
+
+	// The file returned by NewFile should still work for socket I/O.
+	const msg = "hello from the server"
+	go func() {
+		server.Write([]byte(msg))
+	}()
+
+	if err := f.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(f, buf); err != nil {
+		t.Fatalf("reading from NewFile socket: %v", err)
+	}
+	if string(buf) != msg {
+		t.Fatalf("read %q, want %q", buf, msg)
+	}
+}
+
+// TestNewFileDupSocket reproduces, within a single process, the way a
+// socket is passed between processes: WSADuplicateSocket produces a
+// WSAPROTOCOL_INFO describing a socket for a target process (here, ourselves),
+// and WSASocket recreates the socket from that description. The result is a
+// bare socket handle, which is then wrapped with os.NewFile.
+//
+// It checks that NewFile recognizes such a recreated socket as one.
+func TestNewFileDupSocket(t *testing.T) {
+	client, _ := createSocketPair(t, "tcp")
+
+	rc, err := client.(syscall.Conn).SyscallConn()
+	if err != nil {
+		t.Fatalf("SyscallConn: %v", err)
+	}
+	pid := uint32(os.Getpid())
+
+	// Mirror passing a socket to another process, within this single process:
+	// WSADuplicateSocket on the sender produces a WSAPROTOCOL_INFO for the
+	// target process (here, ourselves), and WSASocket recreates the socket from
+	// it, yielding a fresh socket handle referring to the same underlying
+	// connection as client.
+	var info syscall.WSAProtocolInfo
+	var dupErr error
+	if err := rc.Control(func(fd uintptr) {
+		dupErr = windows.WSADuplicateSocket(syscall.Handle(fd), pid, &info)
+	}); err != nil {
+		t.Fatalf("Control: %v", err)
+	}
+	if dupErr != nil {
+		t.Fatalf("WSADuplicateSocket: %v", dupErr)
+	}
+	h, err := windows.WSASocket(-1, -1, -1, &info, 0, windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
+	if err != nil {
+		t.Fatalf("WSASocket: %v", err)
+	}
+
+	// The recreated handle really is a socket: its NT object name is
+	// \Device\Afd, which is how NewFile now distinguishes sockets (which report
+	// FILE_TYPE_PIPE) from ordinary files and named pipes.
+	if name, err := windows.GetObjectName(h); err != nil {
+		t.Fatalf("GetObjectName(duplicated socket): %v", err)
+	} else if name != `\Device\Afd` {
+		t.Fatalf("GetObjectName(duplicated socket) = %q, want %q", name, `\Device\Afd`)
+	}
+
+	// With the fix, NewFile detects the socket and adopts it as one, so it will
+	// be closed with closesocket rather than CloseHandle.
+	f := os.NewFile(uintptr(h), "socket")
+	if f == nil {
+		t.Fatal("NewFile returned nil")
+	}
+	defer f.Close()
+	if !os.FileIsSocket(f) {
+		t.Fatal("NewFile did not recognize the duplicated socket as a socket")
+	}
 }

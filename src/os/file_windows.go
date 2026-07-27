@@ -127,7 +127,41 @@ func newFileFromNewFile(fd uintptr, name string) *File {
 	if h == syscall.InvalidHandle {
 		return nil
 	}
+	if isSocket(h) {
+		// The handle refers to a network socket, for example the descriptor
+		// returned by the Fd method of a *File obtained from a net.Conn.
+		// Treat it as one, so that it is closed with closesocket instead of
+		// CloseHandle and is driven by the runtime network poller.
+		return newFile(h, name, kindSock, true)
+	}
 	return newFile(h, name, kindNewFile, false)
+}
+
+// isSocket reports whether the handle h refers to a network socket.
+//
+// A socket handle is otherwise indistinguishable from a named pipe: both
+// report FILE_TYPE_PIPE from GetFileType. Windows sockets are implemented by
+// the Ancillary Function Driver (AFD), so a socket's NT object name is
+// `\Device\Afd`. Only query the object name for FILE_TYPE_PIPE handles, both
+// to avoid the cost on ordinary files and to keep the query narrow.
+func isSocket(h syscall.Handle) bool {
+	// Never probe Stdin. It is almost always blocking and might be in use by
+	// another process while the os package is initializing; querying its NT
+	// object name below would then block until that I/O completed. Stdin is
+	// practically never a socket anyway. This mirrors the guard in newFile that
+	// avoids calling IsNonblock on Stdin. See go.dev/issue/75949 and
+	// go.dev/issue/76391.
+	if h == syscall.Stdin {
+		return false
+	}
+	if t, err := syscall.GetFileType(h); err != nil || t != syscall.FILE_TYPE_PIPE {
+		return false
+	}
+	name, err := windows.GetObjectName(h)
+	if err != nil {
+		return false
+	}
+	return name == `\Device\Afd`
 }
 
 // net_newWindowsFile is a hidden entry point called by net.conn.File.

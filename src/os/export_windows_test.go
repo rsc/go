@@ -13,3 +13,9 @@ var (
 	AllowReadDirFileID = &allowReadDirFileID
 	SplitPath          = splitPath
 )
+
+// FileIsSocket reports whether f's underlying handle is treated as a
+// network socket by the runtime poller.
+func FileIsSocket(f *File) bool {
+	return f.pfd.IsSocket()
+}

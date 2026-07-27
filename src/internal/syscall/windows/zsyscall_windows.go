@@ -103,6 +103,7 @@ var (
 	procNtCreateFile                      = modntdll.NewProc("NtCreateFile")
 	procNtOpenFile                        = modntdll.NewProc("NtOpenFile")
 	procNtQueryInformationFile            = modntdll.NewProc("NtQueryInformationFile")
+	procNtQueryObject                     = modntdll.NewProc("NtQueryObject")
 	procNtSetInformationFile              = modntdll.NewProc("NtSetInformationFile")
 	procRtlGetVersion                     = modntdll.NewProc("RtlGetVersion")
 	procRtlIsDosDeviceName_U              = modntdll.NewProc("RtlIsDosDeviceName_U")
@@ -578,6 +579,14 @@ func NtOpenFile(handle *syscall.Handle, access uint32, oa *OBJECT_ATTRIBUTES, io
 
 func NtQueryInformationFile(handle syscall.Handle, iosb *IO_STATUS_BLOCK, inBuffer unsafe.Pointer, inBufferLen uint32, class uint32) (ntstatus error) {
 	r0, _, _ := syscall.SyscallN(procNtQueryInformationFile.Addr(), uintptr(handle), uintptr(unsafe.Pointer(iosb)), uintptr(inBuffer), uintptr(inBufferLen), uintptr(class))
+	if r0 != 0 {
+		ntstatus = NTStatus(r0)
+	}
+	return
+}
+
+func NtQueryObject(handle syscall.Handle, class uint32, outBuffer unsafe.Pointer, outBufferLen uint32, retLen *uint32) (ntstatus error) {
+	r0, _, _ := syscall.SyscallN(procNtQueryObject.Addr(), uintptr(handle), uintptr(class), uintptr(outBuffer), uintptr(outBufferLen), uintptr(unsafe.Pointer(retLen)))
 	if r0 != 0 {
 		ntstatus = NTStatus(r0)
 	}
