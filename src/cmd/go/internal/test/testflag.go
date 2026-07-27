@@ -67,6 +67,7 @@ func init() {
 	cf.Bool("short", false, "tell long-running tests to shorten their run time")
 	cf.String("skip", "", "skip tests and examples matching the regular `expression`")
 	cf.DurationVar(&testTimeout, "timeout", 10*time.Minute, "if a test binary runs longer than duration d, panic") // known to cmd/dist
+	cf.DurationVar(&testTestTimeout, "testtimeout", 0, "if an individual test runs longer than duration d, panic")
 	cf.String("fuzztime", "", "run enough `iterations` of the fuzz target during fuzzing to take t")
 	cf.String("fuzzminimizetime", "", "run enough `iterations` of the fuzz target during each minimization attempt to take t")
 	cf.StringVar(&testTrace, "trace", "", "write an execution trace to `file`")
@@ -365,7 +366,7 @@ func testFlags(args []string) (packageNames, passToTest []string) {
 	// Inject flags from GOFLAGS before the explicit command-line arguments.
 	// (They must appear before the flag terminator or first non-flag argument.)
 	// Also determine whether flags with awkward defaults have already been set.
-	var timeoutSet, outputDirSet bool
+	var timeoutSet, testtimeoutSet, outputDirSet bool
 	CmdTest.Flag.Visit(func(f *flag.Flag) {
 		short := strings.TrimPrefix(f.Name, "test.")
 		if addFromGOFLAGS[f.Name] {
@@ -374,6 +375,8 @@ func testFlags(args []string) (packageNames, passToTest []string) {
 		switch short {
 		case "timeout":
 			timeoutSet = true
+		case "testtimeout":
+			testtimeoutSet = true
 		case "outputdir":
 			outputDirSet = true
 		}
@@ -384,6 +387,19 @@ func testFlags(args []string) (packageNames, passToTest []string) {
 	// timeout to the command line.
 	if testTimeout > 0 && !timeoutSet {
 		injectedFlags = append(injectedFlags, fmt.Sprintf("-test.timeout=%v", testTimeout))
+	}
+
+	// 'go test' also has a default per-test (per-function) timeout that the test
+	// binary itself does not. When -testtimeout is not set explicitly, inject a
+	// default: the explicit -timeout value if one was given (so a single long
+	// test run with a large -timeout isn't killed at the small per-test default),
+	// otherwise 1 minute.
+	if !testtimeoutSet {
+		def := 1 * time.Minute
+		if timeoutSet {
+			def = testTimeout
+		}
+		injectedFlags = append(injectedFlags, fmt.Sprintf("-test.testtimeout=%v", def))
 	}
 
 	// Similarly, the test binary defaults -test.outputdir to its own working

@@ -474,6 +474,7 @@ func Init() {
 	panicOnExit0 = flag.Bool("test.paniconexit0", false, "panic on call to os.Exit(0)")
 	traceFile = flag.String("test.trace", "", "write an execution trace to `file`")
 	timeout = flag.Duration("test.timeout", 0, "panic test binary after duration `d` (default 0, timeout disabled)")
+	perTestTimeout = flag.Duration("test.testtimeout", 0, "panic an individual test after it runs for duration `d` (default 0, per-test timeout disabled)")
 	cpuListStr = flag.String("test.cpu", "", "comma-separated `list` of cpu counts to run each test with")
 	parallel = flag.Int("test.parallel", runtime.GOMAXPROCS(0), "run at most `n` tests in parallel")
 	testlog = flag.String("test.testlogfile", "", "write test action log to `file` (for use only by cmd/go)")
@@ -507,6 +508,7 @@ var (
 	panicOnExit0         *bool
 	traceFile            *string
 	timeout              *time.Duration
+	perTestTimeout       *time.Duration
 	cpuListStr           *string
 	parallel             *int
 	shuffle              *string
@@ -740,6 +742,19 @@ type common struct {
 
 	ctx       context.Context
 	cancelCtx context.CancelFunc
+
+	// Per-test timeout (go.dev/issue/48157). The timer only counts down while
+	// the test is running: it is paused while the test is blocked in Parallel or
+	// blocked in Run waiting for a subtest. All of the following fields are
+	// guarded by timerMu.
+	timerMu    sync.Mutex
+	timeout    time.Duration     // per-test running-time budget; 0 disables
+	elapsed    time.Duration     // running time consumed so far
+	active     bool              // test is currently in a running interval
+	timer      *time.Timer       // fires timeoutPanic; nil while paused/disabled
+	timerStart highPrecisionTime // start of the current running interval
+	timerGen   int64             // generation, to ignore stale timer callbacks
+	m          *M                // owning M, for flushing profiles on timeout
 }
 
 // Short reports whether the -test.short flag is set.
@@ -991,6 +1006,7 @@ type TB interface {
 	SkipNow()
 	Skipf(format string, args ...any)
 	Skipped() bool
+	SetTimeout(d time.Duration)
 	TempDir() string
 	Context() context.Context
 	Output() io.Writer
@@ -1939,6 +1955,7 @@ func (t *T) Parallel() {
 	// in the test duration. Record the elapsed time thus far and reset the
 	// timer afterwards.
 	t.duration += highPrecisionTimeSince(t.start)
+	t.pauseTimer()
 
 	// Add to the list of tests to be released by the parent.
 	t.parent.sub = append(t.parent.sub, t)
@@ -1970,6 +1987,7 @@ func (t *T) Parallel() {
 	}
 	running.Store(t.name, highPrecisionTimeNow())
 	t.start = highPrecisionTimeNow()
+	t.resumeTimer()
 
 	// Reset the local race counter to ignore any races that happened while this
 	// goroutine was blocked, such as in the parent test or in other parallel
@@ -2033,6 +2051,100 @@ type InternalTest struct {
 }
 
 var errNilPanicOrGoexit = errors.New("test executed panic(nil) or runtime.Goexit")
+
+// SetTimeout sets the maximum amount of time the test may spend running before
+// the test binary is killed. The timer counts down only while the test is
+// running: it does not advance while the test is blocked in [T.Parallel] or
+// blocked in [T.Run] waiting for a subtest.
+//
+// SetTimeout does not reset the elapsed time already consumed by the test, so
+// setting a timeout smaller than the running time already elapsed causes an
+// immediate timeout. A duration d <= 0 disables the per-test timeout.
+//
+// The timeout is inherited by subtests started with [T.Run], each of which gets
+// its own independent timer seeded from the parent's current timeout.
+//
+// When a test times out the whole test binary is killed, with a message naming
+// the test that timed out.
+func (c *common) SetTimeout(d time.Duration) {
+	c.timerMu.Lock()
+	defer c.timerMu.Unlock()
+	if c.active {
+		// Account for the running time consumed against the old budget, then
+		// restart the timer against the new one. SetTimeout never resets the
+		// elapsed time, so shrinking the budget below it times out immediately.
+		c.elapsed += highPrecisionTimeSince(c.timerStart)
+		c.timerStart = highPrecisionTimeNow()
+		if c.timer != nil {
+			c.timer.Stop()
+			c.timer = nil
+		}
+	}
+	c.timeout = d
+	c.startTimerLocked()
+}
+
+// startTimerLocked arms the per-test timer for the remaining budget, provided
+// the test is currently running and has a timeout set. c.timerMu must be held,
+// and c.timerStart must mark the start of the current running interval.
+func (c *common) startTimerLocked() {
+	if !c.active || c.timeout <= 0 || c.isSynctest {
+		// Not running, disabled, or inside a synctest bubble. A bubble uses a
+		// fake clock, so a timer created here would not measure real time; a
+		// too-long bubble is instead caught by the real-time timer of an
+		// ancestor test outside the bubble.
+		return
+	}
+	remaining := c.timeout - c.elapsed
+	if remaining < 0 {
+		remaining = 0
+	}
+	c.timerGen++
+	gen := c.timerGen
+	c.timer = time.AfterFunc(remaining, func() { c.timeoutPanic(gen) })
+}
+
+// resumeTimer marks the start of a running interval and arms the timer.
+func (c *common) resumeTimer() {
+	c.timerMu.Lock()
+	defer c.timerMu.Unlock()
+	if c.active {
+		return
+	}
+	c.active = true
+	c.timerStart = highPrecisionTimeNow()
+	c.startTimerLocked()
+}
+
+// pauseTimer marks the end of a running interval, accumulating the running time
+// consumed during it and stopping the timer.
+func (c *common) pauseTimer() {
+	c.timerMu.Lock()
+	defer c.timerMu.Unlock()
+	if !c.active {
+		return
+	}
+	c.elapsed += highPrecisionTimeSince(c.timerStart)
+	c.active = false
+	if c.timer != nil {
+		c.timer.Stop()
+		c.timer = nil
+	}
+}
+
+// timeoutPanic kills the test binary because the test named c.name exceeded its
+// per-test timeout. gen identifies the timer that fired; if it has since been
+// superseded (by pauseTimer or SetTimeout) the callback is stale and ignored.
+func (c *common) timeoutPanic(gen int64) {
+	c.timerMu.Lock()
+	if c.timer == nil || c.timerGen != gen {
+		c.timerMu.Unlock()
+		return
+	}
+	timeout := c.timeout
+	c.timerMu.Unlock()
+	panicTimedOut(c.m, "test "+c.name, timeout)
+}
 
 func tRunner(t *T, fn func(t *T)) {
 	t.runner = callerName(0)
@@ -2133,6 +2245,7 @@ func tRunner(t *T, fn func(t *T)) {
 			doPanic(err)
 		}
 
+		t.pauseTimer()
 		t.duration += highPrecisionTimeSince(t.start)
 
 		if len(t.sub) > 0 {
@@ -2153,7 +2266,9 @@ func tRunner(t *T, fn func(t *T)) {
 			// in case the cleanup hangs.
 			cleanupStart := highPrecisionTimeNow()
 			running.Store(t.name, cleanupStart)
+			t.resumeTimer()
 			err := t.runCleanup(recoverAndReturnPanic)
+			t.pauseTimer()
 			t.duration += highPrecisionTimeSince(cleanupStart)
 			if err != nil {
 				doPanic(err)
@@ -2197,6 +2312,7 @@ func tRunner(t *T, fn func(t *T)) {
 
 	t.start = highPrecisionTimeNow()
 	t.resetRaces()
+	t.resumeTimer()
 	fn(t)
 
 	// code beyond here will not be executed when FailNow is invoked
@@ -2246,6 +2362,11 @@ func (t *T) Run(name string, f func(t *T)) bool {
 			chatty:     t.chatty,
 			ctx:        ctx,
 			cancelCtx:  cancelCtx,
+			// Inherit the per-test timeout; the subtest gets its own timer
+			// (elapsed starts at zero). Reading t.timeout without the lock is
+			// safe: Run is called only from the parent's own test goroutine.
+			timeout: t.timeout,
+			m:       t.m,
 		},
 		tstate: t.tstate,
 	}
@@ -2269,12 +2390,17 @@ func (t *T) Run(name string, f func(t *T)) bool {
 	// top-level test function or some other goroutine it has spawned.
 	// To avoid confusing false-negatives, we leave the parent in the running map
 	// even though in the typical case it is blocked.
+	//
+	// Pause the parent's per-test timer while it is blocked here: the parent is
+	// not actively running while it waits for the subtest.
+	t.parent.pauseTimer()
 
 	if !<-t.signal {
 		// At this point, it is likely that FailNow was called on one of the
 		// parent tests by one of the subtests. Continue aborting up the chain.
 		runtime.Goexit()
 	}
+	t.parent.resumeTimer()
 
 	if t.chatty != nil && t.chatty.json {
 		t.chatty.Updatef(t.parent.name, "=== NAME  %s\n", t.parent.name)
@@ -2332,6 +2458,23 @@ func (t *T) Deadline() (deadline time.Time, ok bool) {
 		panic("testing: t.Deadline called inside synctest bubble")
 	}
 	deadline = t.tstate.deadline
+
+	// An active per-test timeout is an implied wall-clock deadline: the test
+	// will be killed once it has spent (timeout-elapsed) more time running.
+	// Report whichever deadline comes first.
+	t.timerMu.Lock()
+	if t.timeout > 0 {
+		remaining := t.timeout - t.elapsed
+		if t.active {
+			remaining -= highPrecisionTimeSince(t.timerStart)
+		}
+		perTest := time.Now().Add(remaining)
+		if deadline.IsZero() || perTest.Before(deadline) {
+			deadline = perTest
+		}
+	}
+	t.timerMu.Unlock()
+
 	return deadline, !deadline.IsZero()
 }
 
@@ -2604,8 +2747,8 @@ func (m *M) Run() (code int) {
 	if !*isFuzzWorker {
 		deadline := m.startAlarm()
 		haveExamples = len(m.examples) > 0
-		testRan, testOk := runTests(m.deps.ModulePath(), m.deps.ImportPath(), m.deps.MatchString, m.tests, deadline)
-		fuzzTargetsRan, fuzzTargetsOk := runFuzzTests(m.deps, m.fuzzTargets, deadline)
+		testRan, testOk := runTests(m, m.deps.ModulePath(), m.deps.ImportPath(), m.deps.MatchString, m.tests, deadline)
+		fuzzTargetsRan, fuzzTargetsOk := runFuzzTests(m, m.deps, m.fuzzTargets, deadline)
 		exampleRan, exampleOk := runExamples(m.deps.MatchString, m.examples)
 		m.stopAlarm()
 		if !testRan && !exampleRan && !fuzzTargetsRan && *matchBenchmarks == "" && *matchFuzz == "" {
@@ -2632,7 +2775,7 @@ func (m *M) Run() (code int) {
 		}
 	}
 
-	fuzzingOk := runFuzzing(m.deps, m.fuzzTargets)
+	fuzzingOk := runFuzzing(m, m.deps, m.fuzzTargets)
 	if !fuzzingOk {
 		fmt.Print(chatty.prefix(), "FAIL\n")
 		if *isFuzzWorker {
@@ -2705,14 +2848,14 @@ func RunTests(matchString func(pat, str string) (bool, error), tests []InternalT
 	if *timeout > 0 {
 		deadline = time.Now().Add(*timeout)
 	}
-	ran, ok := runTests("", "", matchString, tests, deadline)
+	ran, ok := runTests(nil, "", "", matchString, tests, deadline)
 	if !ran && !haveExamples {
 		fmt.Fprintln(os.Stderr, "testing: warning: no tests to run")
 	}
 	return ok
 }
 
-func runTests(modulePath, importPath string, matchString func(pat, str string) (bool, error), tests []InternalTest, deadline time.Time) (ran, ok bool) {
+func runTests(m *M, modulePath, importPath string, matchString func(pat, str string) (bool, error), tests []InternalTest, deadline time.Time) (ran, ok bool) {
 	ok = true
 	for _, procs := range cpuList {
 		runtime.GOMAXPROCS(procs)
@@ -2738,6 +2881,8 @@ func runTests(modulePath, importPath string, matchString func(pat, str string) (
 					cancelCtx:  cancelCtx,
 					modulePath: modulePath,
 					importPath: importPath,
+					timeout:    *perTestTimeout,
+					m:          m,
 				},
 				tstate: tstate,
 			}
@@ -2942,6 +3087,30 @@ func toOutputDir(path string) string {
 	return fmt.Sprintf("%s%c%s", *outputDir, os.PathSeparator, path)
 }
 
+// panicTimedOut kills the test binary after a timeout, first flushing profiles
+// (via m.after, when m is non-nil) and dumping all goroutine stacks. what
+// describes what timed out, for example "test" or "test TestFoo". It is shared
+// by the whole-binary -timeout (startAlarm) and the per-test timeout
+// ((*common).timeoutPanic). It panics rather than exiting because Go cannot
+// kill a single goroutine.
+func panicTimedOut(m *M, what string, timeout time.Duration) {
+	if m != nil {
+		m.after()
+	}
+	debug.SetTraceback("all")
+	extra := ""
+	if list := runningList(); len(list) > 0 {
+		var b strings.Builder
+		b.WriteString("\nrunning tests:")
+		for _, name := range list {
+			b.WriteString("\n\t")
+			b.WriteString(name)
+		}
+		extra = b.String()
+	}
+	panic(fmt.Sprintf("%s timed out after %v%s", what, timeout, extra))
+}
+
 // startAlarm starts an alarm if requested.
 func (m *M) startAlarm() time.Time {
 	if *timeout <= 0 {
@@ -2950,20 +3119,7 @@ func (m *M) startAlarm() time.Time {
 
 	deadline := time.Now().Add(*timeout)
 	m.timer = time.AfterFunc(*timeout, func() {
-		m.after()
-		debug.SetTraceback("all")
-		extra := ""
-
-		if list := runningList(); len(list) > 0 {
-			var b strings.Builder
-			b.WriteString("\nrunning tests:")
-			for _, name := range list {
-				b.WriteString("\n\t")
-				b.WriteString(name)
-			}
-			extra = b.String()
-		}
-		panic(fmt.Sprintf("test timed out after %v%s", *timeout, extra))
+		panicTimedOut(m, "test", *timeout)
 	})
 	return deadline
 }

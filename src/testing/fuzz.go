@@ -312,6 +312,10 @@ func (f *F) Fuzz(ff any) {
 				chatty:    f.chatty,
 				ctx:       ctx,
 				cancelCtx: cancelCtx,
+				// Each fuzz input invocation gets its own per-test timer
+				// (go.dev/issue/48157), catching inputs that hang or run slowly.
+				timeout: f.timeout,
+				m:       f.m,
 			},
 			tstate: f.tstate,
 		}
@@ -474,12 +478,12 @@ const (
 // runFuzzTests runs the fuzz tests matching the pattern for -run. This will
 // only run the (*F).Fuzz function for each seed corpus without using the
 // fuzzing engine to generate or mutate inputs.
-func runFuzzTests(deps testDeps, fuzzTests []InternalFuzzTarget, deadline time.Time) (ran, ok bool) {
+func runFuzzTests(m *M, deps testDeps, fuzzTests []InternalFuzzTarget, deadline time.Time) (ran, ok bool) {
 	ok = true
 	if len(fuzzTests) == 0 || *isFuzzWorker {
 		return ran, ok
 	}
-	m := newMatcher(deps.MatchString, *match, "-test.run", *skip)
+	rm := newMatcher(deps.MatchString, *match, "-test.run", *skip)
 	var mFuzz *matcher
 	if *matchFuzz != "" {
 		mFuzz = newMatcher(deps.MatchString, *matchFuzz, "-test.fuzz", *skip)
@@ -492,7 +496,7 @@ func runFuzzTests(deps testDeps, fuzzTests []InternalFuzzTarget, deadline time.T
 				break
 			}
 
-			tstate := newTestState(*parallel, m)
+			tstate := newTestState(*parallel, rm)
 			tstate.deadline = deadline
 			fstate := &fuzzState{deps: deps, mode: seedCorpusOnly}
 			root := common{w: os.Stdout} // gather output in one place
@@ -525,6 +529,8 @@ func runFuzzTests(deps testDeps, fuzzTests []InternalFuzzTarget, deadline time.T
 						chatty:    root.chatty,
 						ctx:       ctx,
 						cancelCtx: cancelCtx,
+						timeout:   *perTestTimeout,
+						m:         m,
 					},
 					tstate: tstate,
 					fstate: fstate,
@@ -559,12 +565,12 @@ func runFuzzTests(deps testDeps, fuzzTests []InternalFuzzTarget, deadline time.T
 //
 // If fuzzing is disabled (-test.fuzz is not set), runFuzzing
 // returns immediately.
-func runFuzzing(deps testDeps, fuzzTests []InternalFuzzTarget) (ok bool) {
+func runFuzzing(m *M, deps testDeps, fuzzTests []InternalFuzzTarget) (ok bool) {
 	if len(fuzzTests) == 0 || *matchFuzz == "" {
 		return true
 	}
-	m := newMatcher(deps.MatchString, *matchFuzz, "-test.fuzz", *skip)
-	tstate := newTestState(1, m)
+	rm := newMatcher(deps.MatchString, *matchFuzz, "-test.fuzz", *skip)
+	tstate := newTestState(1, rm)
 	tstate.isFuzzing = true
 	fstate := &fuzzState{
 		deps: deps,
@@ -611,6 +617,10 @@ func runFuzzing(deps testDeps, fuzzTests []InternalFuzzTarget) (ok bool) {
 			chatty:    root.chatty,
 			ctx:       ctx,
 			cancelCtx: cancelCtx,
+			// Give each generated input its own 1m (default) per-test timer
+			// (go.dev/issue/48157), inherited by the per-input T in F.Fuzz.
+			timeout: *perTestTimeout,
+			m:       m,
 		},
 		fstate: fstate,
 		tstate: tstate,

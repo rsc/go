@@ -2,6 +2,13 @@
 
 ### Go command {#go-command}
 
+The `go test` command now applies a per-test timeout in addition to the
+existing whole-binary `-timeout`. By default each test function is limited to
+one minute of active running time; this can be changed with the new
+`-testtimeout` flag, or per-test with the [testing.T.SetTimeout] method. When
+`-testtimeout` is not set but `-timeout` is set explicitly, the `-timeout`
+value is used as the per-test default.
+
 ### Cgo {#cgo}
 
 ### Vet {#vet}

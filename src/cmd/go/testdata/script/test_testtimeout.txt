@@ -1,0 +1,31 @@
+[short] skip
+env GO111MODULE=off
+cd a
+
+# With no per-test timeout set, 'go test' injects the default 1m per-test timeout.
+go test -v
+stdout '^1m0s$'
+
+# An explicit -testtimeout is propagated to -test.testtimeout.
+go test -v -testtimeout 5s
+stdout '^5s$'
+
+# If -testtimeout is not set but -timeout is set explicitly, the -timeout value
+# becomes the per-test default (so one long test is not killed by the 1m default).
+go test -v -timeout 30m
+stdout '^30m0s$'
+
+# -testtimeout=0 disables the per-test timeout.
+go test -v -testtimeout 0
+stdout '^0s$'
+
+-- a/testtimeout_test.go --
+package t
+import (
+	"flag"
+	"fmt"
+	"testing"
+)
+func TestTestTimeout(t *testing.T) {
+	fmt.Println(flag.Lookup("test.testtimeout").Value.String())
+}

@@ -1,0 +1,4 @@
+pkg testing, method (*B) SetTimeout(time.Duration) #48157
+pkg testing, method (*F) SetTimeout(time.Duration) #48157
+pkg testing, method (*T) SetTimeout(time.Duration) #48157
+pkg testing, type TB interface, SetTimeout(time.Duration) #48157

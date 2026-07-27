@@ -347,6 +347,16 @@ control the execution of any test:
 	    If d is 0, the timeout is disabled.
 	    The default is 10 minutes (10m).
 
+	-testtimeout d
+	    If an individual test function runs longer than duration d, panic.
+	    The timer for a test counts down only while the test is actively
+	    running: it is paused while the test is blocked in t.Parallel or
+	    waiting for a subtest started with t.Run. A test may adjust its own
+	    limit by calling testing.T's SetTimeout method.
+	    If d is 0, the per-test timeout is disabled.
+	    The default is 1 minute (1m), unless -testtimeout is unset and
+	    -timeout is set explicitly, in which case the -timeout value is used.
+
 	-v
 	    Verbose output: log all tests as they are run. Also print all
 	    text from Log and Logf calls even if the test succeeds.
@@ -557,6 +567,7 @@ var (
 	testOutputDir    outputdirFlag                     // -outputdir flag
 	testShuffle      shuffleFlag                       // -shuffle flag
 	testTimeout      time.Duration                     // -timeout flag
+	testTestTimeout  time.Duration                     // -testtimeout flag
 	testV            testVFlag                         // -v flag
 	testVet          = vetFlag{flags: defaultVetFlags} // -vet flag
 )
