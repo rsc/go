@@ -43,6 +43,18 @@ func Eventfd(initval, flags int32) (fd int32, errno uintptr) {
 	return int32(r1), e
 }
 
+func TimerfdCreate(clockid, flags int32) (fd int32, errno uintptr) {
+	r1, _, e := Syscall6(SYS_TIMERFD_CREATE, uintptr(clockid), uintptr(flags), 0, 0, 0, 0)
+	return int32(r1), e
+}
+
+// TimerfdSettime arms or disarms the timer referred to by fd. newValue and
+// oldValue point to struct itimerspec values (see package runtime).
+func TimerfdSettime(fd, flags int32, newValue, oldValue unsafe.Pointer) (errno uintptr) {
+	_, _, e := Syscall6(SYS_TIMERFD_SETTIME, uintptr(fd), uintptr(flags), uintptr(newValue), uintptr(oldValue), 0, 0)
+	return e
+}
+
 func Open(path *byte, mode int, perm uint32) (fd int, errno uintptr) {
 	// Use SYS_OPENAT to match the syscall package.
 	dfd := AT_FDCWD

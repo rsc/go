@@ -63,6 +63,11 @@ func time_runtimeExternalIsReal() bool {
 	return haveExternalTime
 }
 
+//go:linkname time_runtimeExternalTimerReal time.runtimeExternalTimerReal
+func time_runtimeExternalTimerReal() bool {
+	return haveExternalTimer
+}
+
 // A timer is a potentially repeating trigger for calling t.f(t.arg, t.seq).
 // Timers are allocated by client code, often as part of other data structures.
 // Each P has a heap of pointers to timers that it manages.
@@ -80,6 +85,12 @@ type timer struct {
 	state  uint8        // state bits
 	isChan bool         // timer has a channel; immutable; can be read without lock
 	isFake bool         // timer is using fake time; immutable; can be read without lock
+
+	// external reports whether this timer uses the external ("real time") clock
+	// read by nanotimeExternal instead of the internal clock read by nanotime.
+	// It is immutable and can be read without holding the lock. External timers
+	// live in the global externalTimers heap, serviced by externalTimerLoop.
+	external bool
 
 	blocked uint32 // number of goroutines blocked on timer's channel
 	rand    uint32 // randomizes order of timers at same instant; only set when isFake
@@ -396,8 +407,9 @@ func resetForSleep(gp *g, _ unsafe.Pointer) bool {
 // with the additional runtime state following it.
 // The runtime state is inaccessible to package time.
 type timeTimer struct {
-	c    unsafe.Pointer // <-chan time.Time
-	init bool
+	c        unsafe.Pointer // <-chan time.Time
+	init     bool
+	external bool // mirrors time.Timer.external / time.Ticker.external; see package time
 	timer
 }
 
@@ -405,10 +417,15 @@ type timeTimer struct {
 // with the given parameters.
 //
 //go:linkname newTimer time.newTimer
-func newTimer(when, period int64, f func(arg any, seq uintptr, delay int64), arg any, c *hchan) *timeTimer {
+func newTimer(when, period int64, f func(arg any, seq uintptr, delay int64), arg any, c *hchan, external bool) *timeTimer {
 	t := new(timeTimer)
 	t.timer.init(nil, nil)
 	t.trace("new")
+	if external && haveExternalTimer {
+		t.external = true
+		t.timer.external = true
+		externalTimerEnsureStarted()
+	}
 	if raceenabled {
 		racerelease(unsafe.Pointer(&t.timer))
 	}
@@ -658,7 +675,11 @@ func (t *timer) modify(when, period int64, f func(arg any, seq uintptr, delay in
 		t.maybeAdd()
 	}
 	if wake {
-		wakeNetPoller(when)
+		if t.external {
+			externalTimerWakeup()
+		} else {
+			wakeNetPoller(when)
+		}
 	}
 
 	return pending
@@ -713,6 +734,8 @@ func (t *timer) maybeAdd() {
 			throw("invalid timer: fake time but no syncgroup")
 		}
 		ts = &bubble.timers
+	} else if t.external {
+		ts = &externalTimers
 	} else {
 		ts = &mp.p.ptr().timers
 	}
@@ -739,7 +762,11 @@ func (t *timer) maybeAdd() {
 	ts.unlock()
 	releasem(mp)
 	if wake {
-		wakeNetPoller(when)
+		if t.external {
+			externalTimerWakeup()
+		} else {
+			wakeNetPoller(when)
+		}
 	}
 }
 
@@ -1014,7 +1041,7 @@ func (ts *timers) check(now int64, bubble *synctestBubble) (rnow, pollUntil int6
 	if zombies < 0 {
 		badTimer()
 	}
-	force := ts == &getg().m.p.ptr().timers && int(zombies) > int(ts.len.Load())/4
+	force := (ts == &getg().m.p.ptr().timers || ts == &externalTimers) && int(zombies) > int(ts.len.Load())/4
 
 	if now < next && !force {
 		// Next timer is not ready to run, and we don't need to clear deleted timers.

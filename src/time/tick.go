@@ -16,6 +16,7 @@ import "unsafe"
 type Ticker struct {
 	C          <-chan Time // The channel on which the ticks are delivered.
 	initTicker bool
+	external   bool // ticker uses the external ("real time") clock; see external.go
 }
 
 // NewTicker returns a new [Ticker] containing a channel that will send
@@ -41,7 +42,7 @@ func NewTicker(d Duration) *Ticker {
 	// If the client falls behind while reading, we drop ticks
 	// on the floor until the client catches up.
 	c := make(chan Time, 1)
-	t := (*Ticker)(unsafe.Pointer(newTimer(when(d), int64(d), sendTime, c, syncTimer(c))))
+	t := (*Ticker)(unsafe.Pointer(newTimer(when(d), int64(d), sendTime, c, syncTimer(c), false)))
 	t.C = c
 	return t
 }
@@ -70,7 +71,11 @@ func (t *Ticker) Reset(d Duration) {
 	if !t.initTicker {
 		panic("time: Reset called on uninitialized Ticker")
 	}
-	resetTimer((*Timer)(unsafe.Pointer(t)), when(d), int64(d))
+	if t.external {
+		resetTimer((*Timer)(unsafe.Pointer(t)), whenExternal(d), int64(d))
+	} else {
+		resetTimer((*Timer)(unsafe.Pointer(t)), when(d), int64(d))
+	}
 }
 
 // Tick is a convenience wrapper for [NewTicker] providing access to the ticking

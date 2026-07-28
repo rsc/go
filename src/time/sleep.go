@@ -41,7 +41,7 @@ func when(d Duration) int64 {
 // compare linknamed symbol definitions happier.
 //
 //go:linkname newTimer
-func newTimer(when, period int64, f func(any, uintptr, int64), arg any, cp unsafe.Pointer) *Timer
+func newTimer(when, period int64, f func(any, uintptr, int64), arg any, cp unsafe.Pointer, external bool) *Timer
 
 //go:linkname stopTimer
 func stopTimer(*Timer) bool
@@ -61,6 +61,7 @@ func resetTimer(t *Timer, when, period int64) bool
 type Timer struct {
 	C         <-chan Time
 	initTimer bool
+	external  bool // timer uses the external ("real time") clock; see external.go
 }
 
 // Stop prevents the [Timer] from firing.
@@ -109,7 +110,7 @@ func (t *Timer) Stop() bool {
 // eliminating the possibility of those stale values.
 func NewTimer(d Duration) *Timer {
 	c := make(chan Time, 1)
-	t := newTimer(when(d), 0, sendTime, c, syncTimer(c))
+	t := newTimer(when(d), 0, sendTime, c, syncTimer(c), false)
 	t.C = c
 	return t
 }
@@ -139,7 +140,12 @@ func (t *Timer) Reset(d Duration) bool {
 	if !t.initTimer {
 		panic("time: Reset called on uninitialized Timer")
 	}
-	w := when(d)
+	var w int64
+	if t.external {
+		w = whenExternal(d)
+	} else {
+		w = when(d)
+	}
 	return resetTimer(t, w, 0)
 }
 
@@ -175,7 +181,7 @@ func After(d Duration) <-chan Time {
 // be used to cancel the call using its Stop method.
 // The returned Timer's C field is not used and will be nil.
 func AfterFunc(d Duration, f func()) *Timer {
-	return newTimer(when(d), 0, goFunc, f, nil)
+	return newTimer(when(d), 0, goFunc, f, nil, false)
 }
 
 func goFunc(arg any, seq uintptr, delta int64) {

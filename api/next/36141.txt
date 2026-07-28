@@ -1,1 +1,7 @@
 pkg time, func ExternalNow() Time #36141
+pkg time, func ExternalSleep(Duration) #36141
+pkg time, func ExternalNewTimer(Duration) *Timer #36141
+pkg time, func ExternalAfter(Duration) <-chan Time #36141
+pkg time, func ExternalAfterFunc(Duration, func()) *Timer #36141
+pkg time, func ExternalNewTicker(Duration) *Ticker #36141
+pkg time, func ExternalTick(Duration) <-chan Time #36141
