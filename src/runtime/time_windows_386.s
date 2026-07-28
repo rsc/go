@@ -16,7 +16,15 @@ loop:
 	CMPL	AX, DI
 	JNE	loop
 
-	// w = DI:CX
+	// w = DI:CX (hi:lo), in 100ns units.
+	// Default (wintime=internal): subtract the 64-bit InterruptTimeBias so the
+	// monotonic reading is unbiased "program time" and matches nanotime. See
+	// time_windows.h and go.dev/issue/36141.
+	CMPB	runtime·wintimeExternal(SB), $0
+	JNE	monobiased
+	SUBL	(_INTERRUPT_TIME_BIAS+time_lo), CX
+	SBBL	(_INTERRUPT_TIME_BIAS+time_hi1), DI
+monobiased:
 	// multiply by 100
 	MOVL	$100, AX
 	MULL	CX

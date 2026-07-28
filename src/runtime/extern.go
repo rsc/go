@@ -231,6 +231,14 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	because it also disables the conservative stack scanning used
 	for asynchronously preempted goroutines.
 
+	wintime: on Windows, wintime=external selects the classic monotonic
+	clock used by [time.Now], timers, and tickers that continues to
+	advance while the system is asleep. wintime=internal (the default as
+	of Go 1.28) selects "program time", which stops while the system is
+	asleep, matching the monotonic clock on other operating systems.
+	This setting has no effect on other operating systems. See
+	go.dev/issue/36141.
+
 The [net] and [net/http] packages also refer to debugging variables in GODEBUG.
 See the documentation for those packages for details.
 

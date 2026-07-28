@@ -15,3 +15,10 @@
 #define time_lo 0
 #define time_hi1 4
 #define time_hi2 8
+
+// _INTERRUPT_TIME_BIAS is KUSER_SHARED_DATA.InterruptTimeBias, a ULONG64
+// counting the 100ns intervals the system has spent asleep. Subtracting it from
+// the (biased) interrupt time yields the unbiased "program time" that stops
+// while the system is asleep, matching QueryUnbiasedInterruptTime and the Unix
+// CLOCK_MONOTONIC used by nanotime on other systems. See go.dev/issue/36141.
+#define _INTERRUPT_TIME_BIAS 0x7ffe03b0

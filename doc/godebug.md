@@ -154,6 +154,21 @@ for example,
 see the [runtime documentation](/pkg/runtime#hdr-Environment_Variables)
 and the [go command documentation](/cmd/go#hdr-Build_and_test_caching).
 
+### Go 1.28
+
+Go 1.28 changed the default monotonic clock used on Windows by `time.Now`,
+`time.Since`, `time.Sub`, and the runtime's timers and tickers to "program time",
+which stops while the system is asleep. This matches the behavior of the
+monotonic clock on other operating systems (such as the Linux `CLOCK_MONOTONIC`).
+Earlier versions of Go used a clock on Windows that continued to advance while
+the system was asleep. The previous behavior can be restored using the
+[`wintime` setting](/pkg/runtime#hdr-Environment_Variables): `wintime=external`
+selects the old sleep-surviving clock, while `wintime=internal` (the default)
+selects program time. This setting has no effect on other operating systems.
+Programs that need to measure elapsed real time across sleep can instead use the
+`time.External*` functions and `time.Time.Sub`, which are available on all
+operating systems.
+
 ### Go 1.27
 
 Go 1.27 removed the `gotypesalias` setting, as noted in the [Go 1.22](#go-122) section.

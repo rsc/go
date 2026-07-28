@@ -78,11 +78,14 @@ func TestExternalNewTimer(t *testing.T) {
 		t.Errorf("ExternalNewTimer(%v) fired after %v, want >= %v", delay, elapsed, delay)
 	}
 	// The value delivered on the channel should carry a monotonic reading, and
-	// be tagged external exactly when the platform supports it.
+	// be tagged external exactly when the platform has external timers. (This is
+	// HaveExternalTimer, not HaveExternalTime: on platforms with a real external
+	// clock but no external timer notifier, such as Windows, external timers
+	// fall back to the internal machinery and deliver internal readings.)
 	if GetMono(&tick) == 0 {
 		t.Errorf("tick from external timer has no monotonic reading")
 	}
-	if got, want := IsExternal(&tick), HaveExternalTime(); got != want {
+	if got, want := IsExternal(&tick), HaveExternalTimer(); got != want {
 		t.Errorf("IsExternal(external tick) = %v, want %v", got, want)
 	}
 	if d := tick.Sub(start); d < 0 {

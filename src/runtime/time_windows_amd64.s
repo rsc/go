@@ -11,6 +11,14 @@
 TEXT time·now(SB),NOSPLIT,$0-24
 	MOVQ	$_INTERRUPT_TIME, DI
 	MOVQ	time_lo(DI), AX
+	// Default (wintime=internal): subtract InterruptTimeBias so the monotonic
+	// reading is unbiased "program time" and matches nanotime. See
+	// time_windows.h and go.dev/issue/36141.
+	CMPB	runtime·wintimeExternal(SB), $0
+	JNE	monobiased
+	MOVQ	$_INTERRUPT_TIME_BIAS, DI
+	SUBQ	(DI), AX
+monobiased:
 	IMULQ	$100, AX
 	MOVQ	AX, mono+16(FP)
 

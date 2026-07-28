@@ -54,6 +54,14 @@ func HaveExternalTime() bool {
 	return haveExternalTime
 }
 
+// HaveExternalTimer reports whether this platform can schedule timers against
+// the external clock (rather than falling back to the internal timer
+// machinery). It can be false even when HaveExternalTime is true, as on
+// Windows. For testing.
+func HaveExternalTimer() bool {
+	return externalTimersReal
+}
+
 func LoadFromEmbeddedTZData(zone string) (string, error) {
 	return loadFromEmbeddedTZData(zone)
 }

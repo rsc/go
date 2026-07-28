@@ -199,6 +199,36 @@ loop:
 	CMPL	AX, DI
 	JNE	loop
 
+	// wintime = DI:CX (hi:lo), in 100ns units.
+	// Default (wintime=internal): subtract the 64-bit InterruptTimeBias to get
+	// the unbiased "program time" that stops during sleep. GODEBUG=wintime=external
+	// (wintimeExternal != 0) keeps the classic biased reading.
+	CMPB	runtime·wintimeExternal(SB), $0
+	JNE	nanobiased
+	SUBL	(_INTERRUPT_TIME_BIAS+time_lo), CX
+	SBBL	(_INTERRUPT_TIME_BIAS+time_hi1), DI
+nanobiased:
+	// multiply by 100
+	MOVL	$100, AX
+	MULL	CX
+	IMULL	$100, DI
+	ADDL	DI, DX
+	// wintime*100 = DX:AX
+	MOVL	AX, ret_lo+0(FP)
+	MOVL	DX, ret_hi+4(FP)
+	RET
+
+// func nanotimeExternal1() int64
+// Reads the biased interrupt time, which advances during sleep (real time),
+// regardless of the wintime setting. See time_external_windows.go.
+TEXT runtime·nanotimeExternal1(SB),NOSPLIT,$0-8
+extloop:
+	MOVL	(_INTERRUPT_TIME+time_hi1), AX
+	MOVL	(_INTERRUPT_TIME+time_lo), CX
+	MOVL	(_INTERRUPT_TIME+time_hi2), DI
+	CMPL	AX, DI
+	JNE	extloop
+
 	// wintime = DI:CX, multiply by 100
 	MOVL	$100, AX
 	MULL	CX

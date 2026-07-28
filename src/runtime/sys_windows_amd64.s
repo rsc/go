@@ -200,6 +200,24 @@ TEXT runtime·settls(SB),NOSPLIT,$0
 TEXT runtime·nanotime1(SB),NOSPLIT,$0-8
 	MOVQ	$_INTERRUPT_TIME, DI
 	MOVQ	time_lo(DI), AX
+	// Default (wintime=internal): subtract InterruptTimeBias to get the
+	// unbiased "program time" that stops during sleep. GODEBUG=wintime=external
+	// (wintimeExternal != 0) keeps the classic biased reading.
+	CMPB	runtime·wintimeExternal(SB), $0
+	JNE	nanobiased
+	MOVQ	$_INTERRUPT_TIME_BIAS, DI
+	SUBQ	(DI), AX
+nanobiased:
+	IMULQ	$100, AX
+	MOVQ	AX, ret+0(FP)
+	RET
+
+// func nanotimeExternal1() int64
+// Reads the biased interrupt time, which advances during sleep (real time),
+// regardless of the wintime setting. See time_external_windows.go.
+TEXT runtime·nanotimeExternal1(SB),NOSPLIT,$0-8
+	MOVQ	$_INTERRUPT_TIME, DI
+	MOVQ	time_lo(DI), AX
 	IMULQ	$100, AX
 	MOVQ	AX, ret+0(FP)
 	RET

@@ -541,6 +541,16 @@ func parsegodebug(godebug string, seen map[string]bool) {
 			seen[key] = true
 		}
 
+		// wintime selects the Windows interrupt-time clock (go.dev/issue/36141).
+		// Its value is a name ("internal"/"external"), not an integer, so it is
+		// handled outside the dbgvars loop. It can only be set at startup.
+		if key == "wintime" {
+			if seen == nil {
+				setwintime(value)
+			}
+			continue
+		}
+
 		// Update MemProfileRate directly here since it
 		// is int, not int32, and should only be updated
 		// if specified in GODEBUG.
