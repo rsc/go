@@ -6,6 +6,7 @@ package net
 
 import (
 	"context"
+	"errors"
 	"internal/bytealg"
 	"internal/godebug"
 	"internal/nettrace"
@@ -296,7 +297,7 @@ func (d *Dialer) fallbackDelay() time.Duration {
 	if d.FallbackDelay > 0 {
 		return d.FallbackDelay
 	} else {
-		return 300 * time.Millisecond
+		return 250 * time.Millisecond
 	}
 }
 
@@ -355,8 +356,15 @@ func (r *Resolver) resolveAddrList(ctx context.Context, op, network, addr string
 		return addrList{addr}, nil
 	}
 	addrs, err := r.internetAddrList(ctx, afnet, addr)
-	if err != nil || op != "dial" || hint == nil {
+	if err != nil || op != "dial" {
 		return addrs, err
+	}
+	return filterAddrListByHint(addrs, hint)
+}
+
+func filterAddrListByHint(addrs addrList, hint Addr) (addrList, error) {
+	if hint == nil {
+		return addrs, nil
 	}
 	var (
 		tcp      *TCPAddr
@@ -539,15 +547,55 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn
 		resolveCtx = context.WithValue(resolveCtx, nettrace.TraceKey{}, &shadow)
 	}
 
-	addrs, err := d.resolver().resolveAddrList(resolveCtx, "dial", network, address, d.LocalAddr)
-	if err != nil {
-		return nil, &OpError{Op: "dial", Net: network, Source: nil, Addr: nil, Err: err}
-	}
-
 	sd := &sysDialer{
 		Dialer:  *d,
 		network: network,
 		address: address,
+	}
+
+	if network == "tcp" && d.dualStack() {
+		if host, port, err := SplitHostPort(address); err == nil && host != "" {
+			if _, err := netip.ParseAddr(host); err != nil {
+				// host is not a literal IP, do parallel lookup
+				portnum, err := d.resolver().LookupPort(resolveCtx, network, port)
+				if err != nil {
+					return nil, &OpError{Op: "dial", Net: network, Source: nil, Addr: nil, Err: err}
+				}
+
+				dnsCh := make(chan dnsResult, 2)
+				go func() {
+					ips, err := d.resolver().lookupIPAddr(resolveCtx, "ip6", host)
+					addrs := make(addrList, 0, len(ips))
+					for _, ip := range ips {
+						addr := &TCPAddr{IP: ip.IP, Port: portnum, Zone: ip.Zone}
+						if !isIPv4(addr) {
+							addrs = append(addrs, addr)
+						}
+					}
+					filtered, err := filterAddrListByHint(addrs, d.LocalAddr)
+					dnsCh <- dnsResult{addrs: filtered, err: err, is6: true}
+				}()
+				go func() {
+					ips, err := d.resolver().lookupIPAddr(resolveCtx, "ip4", host)
+					addrs := make(addrList, 0, len(ips))
+					for _, ip := range ips {
+						addr := &TCPAddr{IP: ip.IP, Port: portnum, Zone: ip.Zone}
+						if isIPv4(addr) {
+							addrs = append(addrs, addr)
+						}
+					}
+					filtered, err := filterAddrListByHint(addrs, d.LocalAddr)
+					dnsCh <- dnsResult{addrs: filtered, err: err, is6: false}
+				}()
+
+				return sd.dialParallelV2(ctx, dnsCh)
+			}
+		}
+	}
+
+	addrs, err := d.resolver().resolveAddrList(resolveCtx, "dial", network, address, d.LocalAddr)
+	if err != nil {
+		return nil, &OpError{Op: "dial", Net: network, Source: nil, Addr: nil, Err: err}
 	}
 
 	var primaries, fallbacks addrList
@@ -726,6 +774,136 @@ func (sd *sysDialer) dialParallel(ctx context.Context, primaries, fallbacks addr
 			}
 		}
 	}
+}
+
+type dnsResult struct {
+	addrs addrList
+	err   error
+	is6   bool
+}
+
+func (sd *sysDialer) dialParallelV2(ctx context.Context, dnsCh <-chan dnsResult) (Conn, error) {
+	// Indicates to attempts that the dialing process is done.
+	ctx, dialDone := context.WithCancel(ctx)
+	defer dialDone()
+
+	var ip4s, ip6s addrList
+	var lastDialed Addr
+	var lookupErr error
+	var dialErr error
+
+	// We start with a closed channel so the first attempt starts immediately.
+	var attemptDelayCh <-chan struct{}
+	closedCh := make(chan struct{})
+	close(closedCh)
+	attemptDelayCh = closedCh
+
+	type dialResult struct {
+		conn Conn
+		err  error
+	}
+	dialResultCh := make(chan dialResult)
+
+	// opsPending tracks:
+	// - active DNS lookups (starts at 2: one for IPv4, one for IPv6)
+	// - pending addresses to dial
+	opsPending := 2
+
+	var readyToDialCh <-chan struct{}
+
+	for opsPending > 0 {
+		if len(ip6s) == 0 && len(ip4s) == 0 {
+			readyToDialCh = nil
+		} else {
+			if lastDialed == nil && len(ip6s) == 0 && dnsCh != nil {
+				// Resolution Delay (RFC 8305 Section 8):
+				// We have IPv4 but no IPv6, and IPv6 lookup is still pending.
+				// Wait 50ms.
+				if readyToDialCh == nil {
+					delayCtx, cancelDelay := context.WithTimeout(ctx, 50*time.Millisecond)
+					defer cancelDelay()
+					readyToDialCh = delayCtx.Done()
+				}
+			} else {
+				readyToDialCh = attemptDelayCh
+			}
+		}
+
+		select {
+		case res, ok := <-dnsCh:
+			if !ok {
+				continue
+			}
+			opsPending-- // One lookup finished.
+			if res.err != nil {
+				if lookupErr == nil {
+					lookupErr = res.err
+				} else {
+					lookupErr = errors.Join(lookupErr, res.err)
+				}
+				continue
+			}
+			// Add addresses.
+			if res.is6 {
+				ip6s = append(ip6s, res.addrs...)
+			} else {
+				ip4s = append(ip4s, res.addrs...)
+			}
+			opsPending += len(res.addrs)
+
+		case <-readyToDialCh:
+			var toDial Addr
+			// Alternate between IPv6 and IPv4.
+			if len(ip6s) == 0 || (lastDialed != nil && !isIPv4(lastDialed) && len(ip4s) > 0) {
+				toDial = ip4s[0]
+				ip4s = ip4s[1:]
+			} else {
+				toDial = ip6s[0]
+				ip6s = ip6s[1:]
+			}
+
+			// Connection Attempt Delay is fallbackDelay().
+			delayCtx, cancelDelay := context.WithTimeout(context.Background(), sd.fallbackDelay())
+			attemptDelayCh = delayCtx.Done()
+
+			go func(addr Addr, cancelDelay context.CancelFunc) {
+				defer cancelDelay()
+				c, err := sd.dialSingle(ctx, addr)
+				select {
+				case <-ctx.Done():
+					if c != nil {
+						c.Close()
+					}
+				case dialResultCh <- dialResult{conn: c, err: err}:
+				}
+			}(toDial, cancelDelay)
+
+			lastDialed = toDial
+
+		case dialRes := <-dialResultCh:
+			opsPending-- // One dial finished.
+			if dialRes.err != nil {
+				if dialErr == nil {
+					dialErr = dialRes.err
+				} else {
+					dialErr = errors.Join(dialErr, dialRes.err)
+				}
+				continue
+			}
+			return dialRes.conn, nil
+
+		case <-ctx.Done():
+			return nil, &OpError{Op: "dial", Net: sd.network, Source: nil, Addr: nil, Err: mapErr(ctx.Err())}
+		}
+	}
+
+	if dialErr != nil {
+		return nil, dialErr
+	}
+	if lookupErr != nil {
+		return nil, lookupErr
+	}
+	return nil, &OpError{Op: "dial", Net: sd.network, Source: nil, Addr: nil, Err: errNoSuitableAddress}
 }
 
 // dialSerial connects to a list of addresses in sequence, returning

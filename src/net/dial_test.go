@@ -338,8 +338,8 @@ func TestDialerFallbackDelay(t *testing.T) {
 		{true, 1 * time.Nanosecond, 0},
 		// Use a 200ms explicit timeout.
 		{true, 200 * time.Millisecond, 200 * time.Millisecond},
-		// The default is 300ms.
-		{true, 0, 300 * time.Millisecond},
+		// The default is 250ms.
+		{true, 0, 250 * time.Millisecond},
 	}
 
 	handler := func(dss *dualStackServer, ln Listener) {
@@ -1203,4 +1203,154 @@ func TestDialWithNonZeroDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Close()
+}
+
+func TestDialParallelV2(t *testing.T) {
+	const fallbackDelay = 200 * time.Millisecond
+	const resolutionDelay = 50 * time.Millisecond
+
+	// Helper to convert IP string to Addr
+	makeAddr := func(ip string) Addr {
+		addr, err := ResolveTCPAddr("tcp", JoinHostPort(ip, "80"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return addr
+	}
+
+	var testCases = []struct {
+		name          string
+		dnsResults    []dnsResult
+		dnsDelay      time.Duration // delay between first and second DNS result
+		dialTCP       func(ctx context.Context, network string, laddr, raddr *TCPAddr) (*TCPConn, error)
+		expectElapsed time.Duration
+		expectDst     string
+		expectError   bool
+	}{
+		{
+			name: "IPv6ReadyFirst_IPv6Connects",
+			dnsResults: []dnsResult{
+				{addrs: addrList{makeAddr("::1")}, is6: true},
+				{addrs: addrList{makeAddr("127.0.0.1")}, is6: false},
+			},
+			dnsDelay: 10 * time.Millisecond,
+			dialTCP: func(ctx context.Context, network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
+				return &TCPConn{}, nil
+			},
+			expectElapsed: 0,
+			expectDst:     "[::1]:80",
+		},
+		{
+			name: "IPv4ReadyFirst_IPv6ArrivesWithinResolutionDelay",
+			dnsResults: []dnsResult{
+				{addrs: addrList{makeAddr("127.0.0.1")}, is6: false},
+				{addrs: addrList{makeAddr("::1")}, is6: true},
+			},
+			dnsDelay: 20 * time.Millisecond,
+			dialTCP: func(ctx context.Context, network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
+				return &TCPConn{}, nil
+			},
+			expectElapsed: 20 * time.Millisecond,
+			expectDst:     "[::1]:80",
+		},
+		{
+			name: "IPv4ReadyFirst_IPv6ArrivesAfterResolutionDelay",
+			dnsResults: []dnsResult{
+				{addrs: addrList{makeAddr("127.0.0.1")}, is6: false},
+				{addrs: addrList{makeAddr("::1")}, is6: true},
+			},
+			dnsDelay: 80 * time.Millisecond,
+			dialTCP: func(ctx context.Context, network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
+				return &TCPConn{}, nil
+			},
+			expectElapsed: resolutionDelay,
+			expectDst:     "127.0.0.1:80",
+		},
+		{
+			name: "Interleaving_IPv6Slow_IPv4Succeeds",
+			dnsResults: []dnsResult{
+				{addrs: addrList{makeAddr("::1")}, is6: true},
+				{addrs: addrList{makeAddr("127.0.0.1")}, is6: false},
+			},
+			dnsDelay: 0,
+			dialTCP: func(ctx context.Context, network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
+				if raddr.IP.String() == "::1" {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}
+				return &TCPConn{}, nil
+			},
+			expectElapsed: fallbackDelay,
+			expectDst:     "127.0.0.1:80",
+		},
+		{
+			name: "EarlyFailure_NoFallbackDelay",
+			dnsResults: []dnsResult{
+				{addrs: addrList{makeAddr("::1")}, is6: true},
+				{addrs: addrList{makeAddr("127.0.0.1")}, is6: false},
+			},
+			dnsDelay: 0,
+			dialTCP: func(ctx context.Context, network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
+				if raddr.IP.String() == "::1" {
+					return nil, errors.New("connection refused")
+				}
+				return &TCPConn{}, nil
+			},
+			expectElapsed: 0,
+			expectDst:     "127.0.0.1:80",
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			dnsCh := make(chan dnsResult, 2)
+			go func() {
+				dnsCh <- tt.dnsResults[0]
+				if tt.dnsDelay > 0 {
+					time.Sleep(tt.dnsDelay)
+				}
+				dnsCh <- tt.dnsResults[1]
+			}()
+
+			d := Dialer{
+				FallbackDelay: fallbackDelay,
+			}
+			var dialedAddr string
+			dialTCPWrapper := func(ctx context.Context, network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
+				dialedAddr = raddr.String()
+				return tt.dialTCP(ctx, network, laddr, raddr)
+			}
+			sd := &sysDialer{
+				Dialer:          d,
+				network:         "tcp",
+				address:         "?",
+				testHookDialTCP: dialTCPWrapper,
+			}
+
+			startTime := time.Now()
+			c, err := sd.dialParallelV2(context.Background(), dnsCh)
+			elapsed := time.Since(startTime)
+
+			if err != nil {
+				if !tt.expectError {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if tt.expectError {
+				t.Fatalf("expected error, got nil")
+			}
+			defer c.Close()
+
+			expectMin := tt.expectElapsed - 25*time.Millisecond
+			expectMax := tt.expectElapsed + 45*time.Millisecond
+			if elapsed < expectMin || elapsed > expectMax {
+				t.Errorf("elapsed = %v; want [%v, %v]", elapsed, expectMin, expectMax)
+			}
+
+			if dialedAddr != tt.expectDst {
+				t.Errorf("dialed %s; want %s", dialedAddr, tt.expectDst)
+			}
+		})
+	}
 }
